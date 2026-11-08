@@ -46,6 +46,7 @@ const SHORT: &[&str] = &[
     "app-config",
     "app-mermaid",
     "app-list",
+    "app-remote-stop",
 ];
 
 fn deadline(after: std::time::Duration) {
@@ -90,6 +91,17 @@ fn main() {
     if app && SHORT.contains(&mode.as_str()) {
         deadline(std::time::Duration::from_secs(25));
     }
+    if app {
+        let args: Vec<String> = argv::args().skip(2).collect();
+        match app::remote::dispatch(&mode, &args) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("herdr-nvim: {error:#}");
+                std::process::exit(1);
+            }
+        }
+    }
     let code = match (mode.as_str(), app) {
         ("toggle", false) => run(maneuver::toggle_cmd),
         ("toggle", true) => run(app::sidebar::toggle_cmd),
@@ -131,7 +143,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: herdr-nvim <toggle|sidebar|daemon-gc|on-event|daemons|doctor|pick-file|picker|open-link|app-agents|app-send|app-watch|app-install|app-setup|open|fs|app-find|app-current|app-reveal|app-preview|app-config|app-nvim-check|app-install-nvim|app-mermaid>"
+                "usage: herdr-nvim <toggle|sidebar|daemon-gc|on-event|daemons|doctor|pick-file|picker|open-link|app-agents|app-send|app-watch|app-install|app-setup|open|fs|app-find|app-current|app-reveal|app-preview|app-config|app-nvim-check|app-install-nvim|app-mermaid|app-remote-stop>"
             );
             2
         }
