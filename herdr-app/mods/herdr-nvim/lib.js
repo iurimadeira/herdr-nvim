@@ -1,6 +1,6 @@
 // herdr-nvim's mod helpers.
 
-import { exec, focused, notify, spaces, watchFolder } from "herdr";
+import { exec, focused, notify, watchFolder } from "herdr";
 import { openCard } from "./card.js";
 import { bin, canonical } from "./path.js";
 
@@ -16,8 +16,7 @@ export function place(f = focused()) {
   // A folder only with a terminal: it is that terminal's (a focused mod pane,
   // such as the tree, has none; herdr-nvim then asks the tab's terminals).
   const terminal = f.terminal ?? null;
-  return { space: f.space, tab: f.tab, terminal, cwd: terminal ? f.cwd ?? null : null,
-    machine: spaces().find((s) => s.id === f.space)?.machine ?? null };
+  return { space: f.space, tab: f.tab, terminal, cwd: terminal ? f.cwd ?? null : null };
 }
 
 export function isRemoteTab(tab) {
