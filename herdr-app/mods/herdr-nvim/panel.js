@@ -2,6 +2,7 @@
 // the commands the tab bar's Files button runs on it (mods/tabs/main.js).
 
 import { panes, run, setShared, shared, terminals } from "herdr";
+import { machineOf, qualify } from "./path.js";
 
 // The tab bar's Files button, on or off (`tree = "nvim"`: off; nvim and its
 // own explorer are on cmd-e). The app's own setting for the tab bar's panel
@@ -64,7 +65,10 @@ export function hidePanel(p) {
 
 // The tab's live herdr-nvim terminals (nvim's screen in its pane).
 function nvimTerminals(tab) {
-  return terminals().filter((t) => t.state === "live" && t.labels?.["herdr-nvim.sidebar"] === tab).map((t) => t.address);
+  return terminals().filter((t) => {
+    const label = t.labels?.["herdr-nvim.sidebar"];
+    return t.state === "live" && label && qualify(machineOf(t.address), label) === tab;
+  }).map((t) => t.address);
 }
 
 // The ones a pane of the tab shows: the tab's nvim pane.

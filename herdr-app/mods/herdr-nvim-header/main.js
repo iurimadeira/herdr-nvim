@@ -17,7 +17,7 @@ import { div } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { exec, panes, props, readTextFile, run, shared, spaces, terminals, theme, watchFolder } from "herdr";
 import Pane from "./pane-base.js";
-import { basename, bin, canonical, dirname, key, same } from "./path.js";
+import { basename, bin, canonical, dirname, isRemote, key, same } from "./path.js";
 
 const KINDS = {
   md: "markdown", markdown: "markdown", mdx: "markdown",
@@ -46,6 +46,7 @@ export default class Header extends Pane {
   role() {
     const { pane, terminal } = props() ?? {};
     if (terminal) {
+      if (isRemote(terminal)) return null;
       const tab = terminals().find((t) => t.address === terminal)?.labels?.["herdr-nvim.sidebar"];
       return tab ? { role: "nvim", tab, terminal } : null;
     }

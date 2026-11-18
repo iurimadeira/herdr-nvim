@@ -46,6 +46,7 @@ const SHORT: &[&str] = &[
     "app-config",
     "app-mermaid",
     "app-list",
+    "app-remote-stop",
 ];
 
 fn deadline(after: std::time::Duration) {
@@ -110,6 +111,7 @@ fn main() {
         ("fs", true) => run(app::tree::fs_cmd),
         ("app-find", true) => run(app::tree::find_cmd),
         ("app-current", true) => run(app::tree::current_cmd),
+        ("app-remote-stop", true) => run(app::remote::stop_cmd),
         ("app-reveal", true) => run(app::tree::reveal_cmd),
         ("app-preview", true) => run(app::sidebar::preview_cmd),
         // The installer runs these before the mods are in place.
@@ -123,7 +125,7 @@ fn main() {
         ("app-install-nvim", true) => run(nvim_get::install_nvim_cmd),
         (
             "app-agents" | "app-send" | "app-watch" | "open" | "fs" | "app-find" | "app-current"
-            | "app-reveal" | "app-preview" | "app-install-nvim",
+            | "app-reveal" | "app-preview" | "app-install-nvim" | "app-remote-stop",
             false,
         ) => {
             eprintln!("herdr-nvim: `{mode}` is for the Herdr app (HERDR_NVIM_HOST=app)");
@@ -131,7 +133,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: herdr-nvim <toggle|sidebar|daemon-gc|on-event|daemons|doctor|pick-file|picker|open-link|app-agents|app-send|app-watch|app-install|app-setup|open|fs|app-find|app-current|app-reveal|app-preview|app-config|app-nvim-check|app-install-nvim|app-mermaid>"
+                "usage: herdr-nvim <toggle|sidebar|daemon-gc|on-event|daemons|doctor|pick-file|picker|open-link|app-agents|app-send|app-watch|app-install|app-setup|open|fs|app-find|app-current|app-reveal|app-preview|app-config|app-nvim-check|app-install-nvim|app-mermaid|app-remote-stop>"
             );
             2
         }

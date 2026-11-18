@@ -19,6 +19,7 @@ mod layout_patch;
 pub(crate) mod list;
 pub(crate) mod mermaid;
 mod node;
+pub(crate) mod remote;
 pub(crate) mod rpc;
 mod session;
 pub(crate) mod settings;

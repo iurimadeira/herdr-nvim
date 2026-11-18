@@ -73,6 +73,20 @@ export function basename(path) {
   return rootOf(path) === path ? path : path.slice(path.lastIndexOf("/") + 1);
 }
 
+// Remote IDs: the app names a remote machine's space, tab, terminal or pane
+// "<machine>/<id>"; a local one has no "/". The one rule for both mods (and
+// src/app/remote.rs `machine`).
+export function machineOf(id) {
+  if (typeof id !== "string") return null;
+  const cut = id.indexOf("/");
+  return cut < 0 ? null : id.slice(0, cut);
+}
+
+export const isRemote = (id) => machineOf(id) !== null;
+
+// `id` (as a machine's own core names it) as the app names it.
+export const qualify = (machine, id) => (machine ? `${machine}/${id}` : id);
+
 // The entry `name` (or names a listing or git gave, "/" between them) in the
 // folder `dir`.
 export function child(dir, name) {
