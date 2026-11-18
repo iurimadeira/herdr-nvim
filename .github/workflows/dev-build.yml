@@ -1,0 +1,38 @@
+# Fork-only: builds the Mac (Apple silicon) binary and app bundle from a
+# branch and uploads them as a workflow artifact, for a manual install with
+# `herdr-app/install.sh --binary`. No tag, no release, nothing published.
+name: dev-build
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or SHA to build (default: the dispatched ref)"
+        required: false
+        type: string
+  # Dispatch needs this file on the default branch; until then, and for every
+  # later feature branch, a push builds it.
+  push:
+    branches: ["feat/**"]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    env:
+      TARGET: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - run: rustup target add "$TARGET"
+      - run: cargo build --release --target "$TARGET"
+      - run: cp "target/$TARGET/release/herdr-nvim" "herdr-nvim-$TARGET"
+      - run: herdr-app/bundle.sh "target/$TARGET/release/herdr-nvim" "$TARGET" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: herdr-nvim-dev-aarch64-apple-darwin
+          path: |
+            herdr-nvim-aarch64-apple-darwin
+            herdr-nvim-app-aarch64-apple-darwin.tar.gz
+            herdr-nvim-app-aarch64-apple-darwin.tar.gz.sha256
+          if-no-files-found: error
