@@ -131,8 +131,8 @@ T.test("remote: a daemon without a socket is starting only within the grace peri
   T.eq(remote.unsocketed({ pid = 7, started = now - 1 }, function() return false end, now), { running = false, starting = false })
   T.eq(remote.unsocketed({ pid = 7, started = now - 1 }, live, now), { running = false, starting = true })
   T.eq(remote.unsocketed({ pid = 7, started = now - remote.START_GRACE }, live, now),
-    { running = false, starting = false, orphan = true })
-  T.eq(remote.unsocketed({ pid = 7 }, live, now), { running = false, starting = false, orphan = true })
+    { running = false, starting = false, orphan = true, pid = 7 })
+  T.eq(remote.unsocketed({ pid = 7 }, live, now), { running = false, starting = false, orphan = true, pid = 7 })
 end)
 
 T.test("remote: a lock without a live owner is stale, an empty one only after a grace period", function()
@@ -147,27 +147,125 @@ T.test("remote: a lock without a live owner is stale, an empty one only after a 
   T.ok(remote.stale_lock(nil, math.huge, live))
 end)
 
-T.test("remote: stop ends a daemon that lost its socket", function()
-  if vim.fn.has("win32") == 1 then return end
+T.test("remote: live daemon terminals are the live ones labelled daemon", function()
+  T.eq(remote.live_daemons({
+    { address = "t5", state = "live", labels = { ["herdr-nvim.remote-role"] = "daemon" } },
+    { address = "t6", state = "ended", labels = { ["herdr-nvim.remote-role"] = "daemon" } },
+    { address = "t7", state = "live", labels = { ["herdr-nvim.remote-role"] = "ui" } },
+    { address = "t8", state = "live" },
+  }), { "t5" })
+  T.eq(remote.live_daemons(nil), {})
+end)
+
+T.test("remote: a live daemon terminal without files is starting only while the lock is held", function()
+  local none = { running = false, starting = false }
+  T.eq(remote.classify(none, {}, false), none)
+  T.eq(remote.classify(none, { "t5" }, true), { running = false, starting = true })
+  T.eq(remote.classify(none, { "t5" }, false), { running = false, starting = false, orphan = true })
+  T.eq(remote.classify({ running = false, stale = true }, { "t5" }, false), { running = false, starting = false, orphan = true })
+  local running = { running = true, modified = {} }
+  T.eq(remote.classify(running, { "t5" }, false), running)
+end)
+
+T.test("remote: the stop plan checks unsaved buffers first and kills an orphan only with force", function()
+  local refuse = function(plan, text) T.eq(plan.action, "refuse"); T.ok(plan.reason:find(text, 1, true), plan.reason) end
+  refuse(remote.stop_plan({ running = true, modified = { "/a" } }, {}, true), "unsaved buffers")
+  T.eq(remote.stop_plan({ running = true, modified = {} }, {}, false), { action = "quit" })
+  refuse(remote.stop_plan({ running = false, starting = true }, { "t5" }, true), "still starting")
+  refuse(remote.stop_plan({ running = false, orphan = true, pid = 7 }, { "t5" }, false), "app-remote-stop --force")
+  T.eq(remote.stop_plan({ running = false, orphan = true, pid = 7 }, { "t5" }, true),
+    { action = "kill", terminals = { "t5" }, pid = 7 })
+  T.eq(remote.stop_plan({ running = false, stale = true }, {}, false), { action = "forget" })
+  T.eq(remote.stop_plan({ running = false, starting = false }, {}, false), { action = "none" })
+end)
+
+T.test("remote: a recorded PID is the daemon's only while ps shows its socket", function()
+  T.ok(remote.owns("/usr/bin/nvim --headless --listen /tmp/r/abc.sock\n", "/tmp/r/abc.sock"))
+  T.ok(not remote.owns("/usr/bin/vim notes.txt", "/tmp/r/abc.sock"))
+  T.ok(not remote.owns(nil, "/tmp/r/abc.sock"))
+end)
+
+-- Stop against the real runtime folder, with herdr-core stubbed: `daemons`
+-- is the live daemon terminal list, which `terminal.kill` empties after
+-- `linger` more listings.
+local real_system = vim.system
+local function orphan_stop(meta, opts)
   local uv = vim.uv or vim.loop
   local key = "test-orphan-" .. uv.os_getpid() .. "-" .. uv.hrtime()
   local base = uv.os_tmpdir() .. "/herdr-nvim-remote-" .. uv.getuid() .. "/" .. key
   vim.fn.mkdir(vim.fs.dirname(base), "p", 448)
-  vim.fn.writefile({ vim.json.encode({ pid = uv.os_getpid(), started = 0 }) }, base .. ".json")
-  local killed = {}
-  local ok, err, output = run_helper("stop", {
-    space = "s1", tab = "t1", key = key,
-    reply = { terminals = { { address = "t5", state = "live", labels = { ["herdr-nvim.remote-role"] = "daemon" } } } },
-  }, function(argv, opts)
-    local request = vim.json.decode(opts.stdin:match("[^\n]+\n([^\n]+)"))
+  if meta then vim.fn.writefile({ vim.json.encode(meta(base)) }, base .. ".json") end
+  local daemons, killed, linger = opts.daemons or {}, {}, opts.linger or 0
+  local ok, err, output = run_helper("stop", { space = "s1", tab = "t1", key = key, force = opts.force }, function(argv, o)
+    if argv[1] ~= "hc" then return real_system(argv, o):wait() end
+    local request = vim.json.decode(o.stdin:match("[^\n]+\n([^\n]+)"))
+    local reply = function(value) return { code = 0, stdout = vim.json.encode({ id = 2, result = value }) .. "\n" } end
     if request.method == "terminal.kill" then
       killed[#killed+1] = request.params.terminal
-      os.remove(base .. ".json")
-      return { code = 0, stdout = vim.json.encode({ id = 2, result = vim.empty_dict() }) .. "\n" }
+      return reply(vim.empty_dict())
+    end
+    if request.method == "terminal.list" then
+      local list = {}
+      for _, address in ipairs(daemons) do
+        list[#list+1] = { address = address, state = "live", labels = { ["herdr-nvim.remote-role"] = "daemon" } }
+      end
+      if #killed > 0 and not opts.stuck then
+        if linger == 0 then daemons = {} else linger = linger - 1 end
+      end
+      return reply({ terminals = list })
     end
   end)
+  local left = uv.fs_stat(base .. ".json") ~= nil
   os.remove(base .. ".json")
+  return ok, err, output, killed, left
+end
+
+local function fake_daemon()
+  local job
+  return function(base)
+    job = real_system({ "sh", "-c", "sleep 30; true", "--listen", base .. ".sock" })
+    return { pid = job.pid, started = 0 }
+  end, function() return job end
+end
+
+T.test("remote: stop refuses an orphan without --force and leaves it running", function()
+  if vim.fn.has("win32") == 1 then return end
+  local meta, job = fake_daemon()
+  local ok, err, _, killed, left = orphan_stop(meta, { daemons = { "t5" } })
+  T.ok(not ok); T.ok(tostring(err):find("app-remote-stop --force", 1, true), err)
+  T.eq(killed, {}); T.ok(left)
+  T.ok((vim.uv or vim.loop).kill(job().pid, 0) == 0, "the daemon must still run")
+  job():kill(9)
+end)
+
+T.test("remote: a forced stop ends the recorded daemon Neovim without a daemon terminal", function()
+  if vim.fn.has("win32") == 1 then return end
+  local meta, job = fake_daemon()
+  local ok, err, output, killed, left = orphan_stop(meta, { force = true })
   T.ok(ok, err)
-  T.eq(killed, { "t5" })
+  T.eq(killed, {}); T.ok(not left)
+  T.eq((vim.uv or vim.loop).kill(job().pid, 0), nil, "the recorded daemon is ended")
   T.eq(vim.json.decode(output), { running = false })
+end)
+
+T.test("remote: a forced stop never signals a recorded PID that is no longer the daemon", function()
+  if vim.fn.has("win32") == 1 then return end
+  local uv = vim.uv or vim.loop
+  local ok, err, output, killed, left = orphan_stop(function() return { pid = uv.os_getpid(), started = 0 } end, { force = true })
+  T.ok(ok, err)
+  T.eq(killed, {}); T.ok(not left, "its metadata is forgotten")
+  T.eq(vim.json.decode(output), { running = false })
+end)
+
+T.test("remote: a forced stop of a daemon terminal waits for it to end, not for its files", function()
+  if vim.fn.has("win32") == 1 then return end
+  local ok, err, output, killed, left = orphan_stop(nil, { force = true, daemons = { "t5" }, linger = 2 })
+  T.ok(ok, err)
+  T.eq(killed, { "t5" }); T.ok(not left)
+  T.eq(vim.json.decode(output), { running = false })
+  local old = remote.STOP_WAIT
+  remote.STOP_WAIT = 200
+  ok, err = orphan_stop(function() return { started = 0 } end, { force = true, daemons = { "t5" }, stuck = true })
+  remote.STOP_WAIT = old
+  T.ok(not ok); T.ok(tostring(err):find("did not stop", 1, true), err)
 end)

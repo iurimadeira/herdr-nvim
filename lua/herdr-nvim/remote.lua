@@ -94,7 +94,7 @@ end
 M.START_GRACE = 30
 
 -- A live daemon without a socket is starting only for a while; past that it
--- lost its socket and only `stop` can end it.
+-- lost its socket and only `stop --force` can end it.
 function M.unsocketed(meta, is_alive, now)
   if type(meta) ~= "table" or type(meta.pid) ~= "number" or meta.pid <= 0 or not is_alive(meta.pid) then
     return { running = false, starting = false }
@@ -102,7 +102,52 @@ function M.unsocketed(meta, is_alive, now)
   if type(meta.started) == "number" and now - meta.started < M.START_GRACE then
     return { running = false, starting = true }
   end
+  return { running = false, starting = false, orphan = true, pid = meta.pid }
+end
+
+-- The live daemon terminals in a tab's terminal list.
+function M.live_daemons(list)
+  local out = {}
+  for _, t in ipairs(list or {}) do
+    if t.state == "live" and type(t.labels) == "table" and t.labels["herdr-nvim.remote-role"] == "daemon" then
+      out[#out+1] = t.address
+    end
+  end
+  return out
+end
+
+-- A snapshot with the tab's live daemon terminals. One without a socket or
+-- metadata is starting only while another action holds the lock (`ensure`
+-- holds it until the socket appears); otherwise it is an orphan too.
+function M.classify(state, daemons, locked)
+  if state.running or state.starting or state.orphan or #daemons == 0 then return state end
+  if locked then return { running = false, starting = true } end
   return { running = false, starting = false, orphan = true }
+end
+
+M.ORPHAN = "The remote Neovim lost its socket, so its unsaved buffers cannot be checked; "
+  .. "run herdr-nvim app-remote-stop --force to end it (unsaved edits survive only in its swap files)"
+
+-- What `stop` does: refuse, quit (through the socket), kill (an orphan, only
+-- with force), forget (a dead owner's files) or none.
+function M.stop_plan(state, daemons, force)
+  if state.running then
+    if #state.modified > 0 then return { action = "refuse", reason = "Save the remote Neovim's unsaved buffers before stopping it" } end
+    return { action = "quit" }
+  end
+  if state.starting then return { action = "refuse", reason = "The remote Neovim is still starting; retry when it is ready" } end
+  if state.orphan then
+    if not force then return { action = "refuse", reason = M.ORPHAN } end
+    return { action = "kill", terminals = daemons, pid = state.pid }
+  end
+  if state.stale then return { action = "forget" } end
+  return { action = "none" }
+end
+
+-- Whether `ps` shows the daemon's Neovim (`daemon_argv`): a recorded PID may
+-- since belong to another process.
+function M.owns(args, socket)
+  return type(args) == "string" and args:find("--listen " .. socket, 1, true) ~= nil
 end
 
 local function snapshot(ctx)
@@ -160,6 +205,8 @@ local function terminals(ctx)
 end
 
 M.LOCK_GRACE = 5
+-- serve ends Neovim with SIGTERM, then SIGKILL 2 s later, then waits 2 s more.
+M.STOP_WAIT = 6000
 
 -- The lock is created before its PID is written, so a lock without one is
 -- held only until a kill between the two could have left it behind.
@@ -169,28 +216,29 @@ function M.stale_lock(text, age, is_alive)
   return age > M.LOCK_GRACE
 end
 
+local function held(lock)
+  local stat = uv.fs_stat(lock)
+  if not stat then return false end
+  return not M.stale_lock(read(lock), os.time() - stat.mtime.sec, alive)
+end
+
 local function ensure(ctx, script)
   local base = paths(ctx)
   local lock = base .. ".lock"
   local fd = uv.fs_open(lock, "wx", 384)
   if not fd then
-    local stat = uv.fs_stat(lock)
-    local age = stat and os.time() - stat.mtime.sec or math.huge
-    if not M.stale_lock(read(lock), age, alive) then error("Another remote Neovim action is running for this tab") end
+    if held(lock) then error("Another remote Neovim action is running for this tab") end
     uv.fs_unlink(lock); fd = assert(uv.fs_open(lock, "wx", 384))
   end
   uv.fs_write(fd, tostring(uv.os_getpid())); uv.fs_close(fd)
   local ok, result = xpcall(function()
     local state = snapshot(ctx)
     if state.running then return state end
+    -- This action holds the lock, so no other one is starting a daemon.
+    state = M.classify(state, M.live_daemons(terminals(ctx)), false)
     assert(not state.starting, "The existing remote Neovim is still starting; no replacement was started")
-    assert(not state.orphan, "The remote Neovim lost its socket; run herdr-nvim app-remote-stop, then open it again")
+    assert(not state.orphan, M.ORPHAN .. ", then open it again")
     if state.stale then uv.fs_unlink(base .. ".sock"); uv.fs_unlink(base .. ".json") end
-    for _, t in ipairs(terminals(ctx)) do
-      if t.state == "live" and t.labels["herdr-nvim.remote-role"] == "daemon" then
-        error("A remote Neovim daemon is already starting; retry when it is ready")
-      end
-    end
     core("terminal.run", {
       argv = { ctx.nvim, "--clean", "-l", script, "serve", vim.json.encode(ctx) },
       env = ctx.env, cwd = ctx.root, name = "hnvim-" .. ctx.key, no_parent = true, rm = true,
@@ -262,32 +310,50 @@ local function serve(ctx)
   log:close()
 end
 
+-- Ends an orphan: its daemon terminals (serve stops Neovim with SIGTERM,
+-- which keeps swap files) and its recorded Neovim, when that PID is still it.
+-- Done only once neither is alive; their files are then stale.
+local function kill(ctx, base, plan)
+  for _, address in ipairs(plan.terminals) do core("terminal.kill", { terminal = address }) end
+  local pid = plan.pid
+  if pid and alive(pid) then
+    local ok, args = pcall(run, { "ps", "-o", "args=", "-p", tostring(pid) })
+    if not (ok and M.owns(args, base .. ".sock")) then pid = nil end
+  else
+    pid = nil
+  end
+  if pid then uv.kill(pid, 15) end
+  local function gone()
+    return not (pid and alive(pid)) and #M.live_daemons(terminals(ctx)) == 0
+  end
+  if not vim.wait(M.STOP_WAIT, gone, 250) then
+    if pid and alive(pid) then uv.kill(pid, 9) end
+    assert(vim.wait(2000, gone, 250), "Remote Neovim did not stop; inspect " .. base .. ".log")
+  end
+  uv.fs_unlink(base .. ".sock"); uv.fs_unlink(base .. ".json")
+end
+
+local function stop(ctx)
+  local base = paths(ctx)
+  local state = snapshot(ctx)
+  local daemons = state.running and {} or M.live_daemons(terminals(ctx))
+  local plan = M.stop_plan(M.classify(state, daemons, held(base .. ".lock")), daemons, ctx.force)
+  if plan.action == "refuse" then error(plan.reason, 0) end
+  if plan.action == "quit" then
+    run({ ctx.nvim, "--clean", "--headless", "--server", state.socket, "--remote-send", "<C-\\><C-n><Cmd>qa<CR>" })
+    assert(vim.wait(4000, function() return uv.fs_stat(state.socket) == nil end, 100),
+      "Remote Neovim did not quit; check for unsaved buffers or a prompt")
+  elseif plan.action == "kill" then
+    kill(ctx, base, plan)
+  elseif plan.action == "forget" then
+    uv.fs_unlink(base .. ".sock"); uv.fs_unlink(base .. ".json")
+  end
+  return { running = false }
+end
+
 local function request(op, ctx, script)
   if op == "serve" then serve(ctx); return end
-  if op == "stop" then
-    local state = snapshot(ctx)
-    assert(not state.running or #state.modified == 0, "Save the remote Neovim's unsaved buffers before stopping it")
-    if state.orphan then
-      -- Without a socket its buffers cannot be checked; ending the daemon
-      -- terminal stops Neovim with SIGTERM, which keeps its swap files.
-      local base = paths(ctx)
-      local ended = false
-      for _, t in ipairs(terminals(ctx)) do
-        if t.state == "live" and t.labels["herdr-nvim.remote-role"] == "daemon" then
-          core("terminal.kill", { terminal = t.address }); ended = true
-        end
-      end
-      if not ended then uv.fs_unlink(base .. ".json") end
-      assert(vim.wait(4000, function() return uv.fs_stat(base .. ".json") == nil end, 100),
-        "Remote Neovim did not stop; inspect " .. base .. ".log")
-    end
-    if state.running then
-      run({ ctx.nvim, "--clean", "--headless", "--server", state.socket, "--remote-send", "<C-\\><C-n><Cmd>qa<CR>" })
-      assert(vim.wait(4000, function() return uv.fs_stat(state.socket) == nil end, 100),
-        "Remote Neovim did not quit; check for unsaved buffers or a prompt")
-    end
-    return { running = false }
-  end
+  if op == "stop" then return stop(ctx) end
   local doc, tab = lookup(ctx)
   if op == "info" then return { doc = doc, terminals = terminals(ctx) } end
   if op == "current" then

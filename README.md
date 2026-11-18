@@ -124,6 +124,12 @@ To stop a clean remote editor explicitly (unsaved buffers are refused):
   --tab your-machine/your-tab-id
 ```
 
+A remote editor that is still starting is left alone for its first 30 seconds.
+If it then has no socket (it lost it, or never made one), `open` refuses and
+`app-remote-stop` refuses too, because its unsaved buffers cannot be checked.
+`app-remote-stop --force` ends it anyway: unsaved edits survive only in its
+swap files, and are lost if it runs with `noswapfile`.
+
 The native Files tree, agent-file picker, annotations and rendered previews
 remain local-only.
 

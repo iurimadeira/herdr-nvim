@@ -88,6 +88,9 @@ struct Request {
     line: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     col: Option<u32>,
+    /// `app-remote-stop --force`: end a daemon that lost its socket.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    force: bool,
 }
 
 impl Request {
@@ -114,6 +117,7 @@ impl Request {
             file: None,
             line: None,
             col: None,
+            force: false,
         })
     }
 }
@@ -536,7 +540,8 @@ pub(crate) fn current(ctx: &cli::AppCtx) -> Result<Value> {
 
 pub(crate) fn stop_cmd() -> Result<()> {
     let args: Vec<String> = crate::argv::args().skip(2).collect();
-    let session = Session::new(&cli::target_ctx(&args)?)?;
+    let mut session = Session::new(&cli::target_ctx(&args)?)?;
+    session.request.force = args.iter().any(|arg| arg == "--force");
     session.call("stop")?;
     println!("{}", json!({"stopped": true}));
     Ok(())

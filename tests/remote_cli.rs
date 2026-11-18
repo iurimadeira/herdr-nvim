@@ -489,6 +489,20 @@ esac
         let hc = f.log("hc.log");
         assert!(hc.contains("exec --on box"), "{hc}");
         assert!(hc.contains("/remote/worker.lua stop"), "{hc}");
+        assert!(!hc.contains("\"force\""), "{hc}");
+    }
+
+    #[test]
+    fn remote_stop_passes_force_to_the_remote_helper() {
+        let f = Fixture::new("remote-stop-force", false, false);
+        let result = f.bare(&["app-remote-stop", "--tab", "box/t1", "--force"]);
+        assert_eq!(success(&result)["stopped"], true);
+        let hc = f.log("hc.log");
+        let stop = hc
+            .lines()
+            .find(|l| l.contains("/remote/worker.lua stop"))
+            .unwrap_or_else(|| panic!("{hc}"));
+        assert!(stop.contains("\"force\":true"), "{stop}");
     }
 
     #[test]
