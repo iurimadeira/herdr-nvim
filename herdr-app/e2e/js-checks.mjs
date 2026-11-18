@@ -345,7 +345,7 @@ app.home = "/nonexistent-app-home";
 
 // Remote labels are local to their core; matching a tab must include its machine.
 const { nvimPanes, parkedNvim } = await import("../mods/herdr-nvim/panel.js");
-const { place, isRemoteTab } = await import("../mods/herdr-nvim/lib.js");
+const { place, isRemote, machineOf, qualify, toggleRemote } = await import("../mods/herdr-nvim/lib.js");
 app.spaces = [{ id: "box/s1", machine: "box", tabs: [{ id: "box/t1" }] }];
 app.focused = { space: "box/s1", tab: "box/t1", terminal: "box/t7", cwd: "/remote" };
 app.terminals = [
@@ -357,7 +357,24 @@ assert.deepEqual(nvimPanes("box/t1"), ["box/t9"]);
 assert.deepEqual(nvimPanes("other/t1"), []);
 assert.equal(parkedNvim("other/t1"), "other/t9");
 assert.deepEqual(place(), { space: "box/s1", tab: "box/t1", terminal: "box/t7", cwd: "/remote" });
-assert.ok(isRemoteTab("box/t1") && !isRemoteTab("t1"));
+assert.ok(isRemote("box/t1") && !isRemote("t1") && !isRemote(null) && !isRemote(undefined));
+assert.deepEqual([machineOf("box/t1"), machineOf("t1"), machineOf(7)], ["box", null, null]);
+assert.deepEqual([qualify("box", "t9"), qualify(null, "t9")], ["box/t9", "t9"]);
+assert.equal(qualify(machineOf("box/t5"), "t1"), "box/t1");
+// cmd-e on a remote tab: a toggle without --state, then the shown editor focused.
+app.exec = async (_cmd, args) => {
+  assert.equal(args[0], "toggle");
+  assert.ok(!args.includes("--state"), args.join(" "));
+  assert.equal(JSON.parse(args.at(-1)).tab, "box/t1");
+  return ok(JSON.stringify({ terminal: "box/t9" }));
+};
+app.ran = [];
+await toggleRemote(place(), "overlay-1");
+assert.deepEqual(app.ran, [["pane.focus", { terminal: "box/t9" }]]);
+app.exec = async () => ok(JSON.stringify({ closed: "box/t9" }));
+app.ran = [];
+await toggleRemote(place(), "overlay-1");
+assert.deepEqual(app.ran, [], "a hidden editor focuses nothing");
 app.exec = async (_cmd, args) => {
   assert.deepEqual(args.slice(0, 3), ["toggle", "--state", "close"]);
   assert.equal(JSON.parse(args.at(-1)).tab, "box/t1");

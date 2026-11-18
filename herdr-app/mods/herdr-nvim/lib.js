@@ -1,8 +1,10 @@
 // herdr-nvim's mod helpers.
 
-import { exec, focused, notify, watchFolder } from "herdr";
+import { closeOverlay, exec, focused, notify, run, watchFolder } from "herdr";
 import { openCard } from "./card.js";
-import { bin, canonical } from "./path.js";
+import { bin, canonical, isRemote } from "./path.js";
+
+export { isRemote, machineOf, qualify } from "./path.js";
 
 // The app's folder watch: the paths that changed in `dir`, canonical.
 export async function changesIn(dir) {
@@ -19,8 +21,13 @@ export function place(f = focused()) {
   return { space: f.space, tab: f.tab, terminal, cwd: terminal ? f.cwd ?? null : null };
 }
 
-export function isRemoteTab(tab) {
-  return typeof tab === "string" && tab.includes("/");
+// cmd-e's overlay on a remote tab: the machine's editor flips (no --state:
+// herdr-nvim decides from what the tab shows), and a shown one is focused.
+export async function toggleRemote(at, overlay) {
+  const out = await nvim("toggle", [], at);
+  const made = out && JSON.parse(out);
+  closeOverlay(overlay);
+  if (made?.terminal) run("pane.focus", { terminal: made.terminal });
 }
 
 export function context() {

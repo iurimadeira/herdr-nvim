@@ -37,8 +37,15 @@ pub(crate) fn machine(id: &str) -> Option<&str> {
     id.split_once('/').map(|(machine, _)| machine)
 }
 
+/// The one rule for a context's machine: its tab's, else its space's. A
+/// context whose IDs name different machines (or one local) stays remote, so
+/// `Request::new` refuses it instead of running it locally.
+pub(crate) fn machine_of(ctx: &cli::AppCtx) -> Option<&str> {
+    machine(&ctx.tab).or_else(|| machine(&ctx.space))
+}
+
 pub(crate) fn is_remote(ctx: &cli::AppCtx) -> bool {
-    machine(&ctx.space).is_some() || machine(&ctx.tab).is_some()
+    machine_of(ctx).is_some()
 }
 
 pub(crate) fn require_local(ctx: &cli::AppCtx) -> Result<()> {
@@ -93,9 +100,6 @@ impl Request {
             .map(|t| raw(machine, t).map(str::to_owned))
             .transpose()?;
         let overrides = settings.env_override();
-        if overrides.len() != settings.nvim_env.len() {
-            bail!("invalid nvim_env entry for remote machine {machine}");
-        }
         Ok(Self {
             key: digest(format!("{space}:{tab}").as_bytes())[..20].to_owned(),
             space,
@@ -137,7 +141,7 @@ struct Session {
 
 impl Session {
     fn new(ctx: &cli::AppCtx) -> Result<Self> {
-        let machine = machine(&ctx.tab).context("not a remote tab")?.to_owned();
+        let machine = machine_of(ctx).context("not a remote tab")?.to_owned();
         let settings = config::load().remote_sidebar(&machine);
         let request = Request::new(ctx, &machine, &settings)?;
         let lock = lock(&format!("{machine}:{}:{}", request.space, request.tab))?;
@@ -179,33 +183,14 @@ impl Session {
         {
             bail!("remote tab does not belong to the requested space");
         }
-        let mut screens = info.terminals.iter().filter(|t| {
-            t.state == "live"
-                && t.labels
-                    .get("herdr-nvim.remote-role")
-                    .is_some_and(|role| role == "ui")
-        });
-        let screen = screens.next().map(|t| t.address.clone());
-        if screens.next().is_some() {
-            bail!("the remote tab has multiple Neovim UI clients; close the extra clients first");
-        }
-        Ok((doc, screen))
+        Ok((doc, ui_screen(&info.terminals)?))
     }
 
     fn hide(&self, doc: &doc::Doc, screen: Option<&str>) -> Result<Value> {
-        let Some(screen) = screen.filter(|screen| doc::pane_of(doc, screen).is_some()) else {
+        let Some(screen) = shown(doc, screen) else {
             return Ok(json!({}));
         };
-        let tab = doc::tab(doc, &self.request.tab)
-            .context("missing remote tab")?
-            .1;
-        let panes = node::walk(&tab.root)
-            .filter(|n| {
-                node::terminal(n).is_some()
-                    || n.pointer("/content/mod").and_then(Value::as_str).is_some()
-            })
-            .count();
-        if panes < 2 {
+        if !can_hide(doc, &self.request.tab)? {
             bail!("cannot hide the remote tab's only pane; split another pane first");
         }
         let address = self.qualify(screen);
@@ -221,29 +206,30 @@ impl Session {
         state: &Value,
         focus: bool,
     ) -> Result<Value> {
-        let mut terminal = screen.map(str::to_owned);
-        if let Some(screen) = &terminal {
-            if doc::pane_of(doc, screen).is_none() {
-                let own = doc::terminals_of(doc, &self.request.tab);
-                if own.len() == 1 {
-                    cli::app_do("pane.focus", &json!({"terminal": self.qualify(&own[0])}))?;
-                    let pane =
-                        self.qualify(&doc::pane_of(doc, &own[0]).context("missing anchor pane")?.0);
-                    wait_for(|| {
-                        Ok(cli::app_status()?
-                            .get("focused_pane")
-                            .and_then(Value::as_str)
-                            == Some(pane.as_str()))
-                    })?;
-                    cli::app_do(
-                        "terminal.keep",
-                        &json!({"terminal": self.qualify(screen), "place": sidebar::direction(self.position)}),
-                    )?;
-                } else {
-                    self.kill(screen)?;
-                    terminal = None;
-                }
+        let mut terminal = None;
+        match placement(doc, &self.request.tab, screen)? {
+            Placement::Shown(screen) => terminal = Some(screen),
+            Placement::Reattach {
+                screen,
+                anchor,
+                anchor_pane,
+            } => {
+                cli::app_do("pane.focus", &json!({"terminal": self.qualify(&anchor)}))?;
+                let pane = self.qualify(&anchor_pane);
+                wait_for(|| {
+                    Ok(cli::app_status()?
+                        .get("focused_pane")
+                        .and_then(Value::as_str)
+                        == Some(pane.as_str()))
+                })?;
+                cli::app_do(
+                    "terminal.keep",
+                    &json!({"terminal": self.qualify(&screen), "place": sidebar::direction(self.position)}),
+                )?;
+                terminal = Some(screen);
             }
+            Placement::Replace(screen) => self.kill(&screen)?,
+            Placement::Missing => {}
         }
         if terminal.is_none() {
             let root = self
@@ -303,6 +289,91 @@ impl Session {
     }
 }
 
+/// Pure: the tab's one live Neovim UI client, refusing several.
+fn ui_screen(terminals: &[RemoteTerminal]) -> Result<Option<String>> {
+    let mut screens = terminals.iter().filter(|t| {
+        t.state == "live"
+            && t.labels
+                .get("herdr-nvim.remote-role")
+                .is_some_and(|role| role == "ui")
+    });
+    let screen = screens.next().map(|t| t.address.clone());
+    if screens.next().is_some() {
+        bail!("the remote tab has multiple Neovim UI clients; close the extra clients first");
+    }
+    Ok(screen)
+}
+
+/// Pure: the UI client when a pane shows it.
+fn shown<'a>(doc: &doc::Doc, screen: Option<&'a str>) -> Option<&'a str> {
+    screen.filter(|screen| doc::pane_of(doc, screen).is_some())
+}
+
+/// Pure: whether the tab keeps a pane (a terminal or a mod) once its editor
+/// is hidden; hiding its only pane would close the tab.
+fn can_hide(doc: &doc::Doc, tab: &str) -> Result<bool> {
+    let tab = doc::tab(doc, tab).context("missing remote tab")?.1;
+    let panes = node::walk(&tab.root)
+        .filter(|n| {
+            node::terminal(n).is_some()
+                || n.pointer("/content/mod").and_then(Value::as_str).is_some()
+        })
+        .count();
+    Ok(panes >= 2)
+}
+
+#[derive(Debug, PartialEq)]
+enum Toggle {
+    Hide,
+    Show,
+}
+
+/// Pure: what a toggle does with the editor shown or not.
+fn toggle_action(want: sidebar::Want, shown: bool) -> Toggle {
+    if want == sidebar::Want::Close || (want == sidebar::Want::Flip && shown) {
+        Toggle::Hide
+    } else {
+        Toggle::Show
+    }
+}
+
+/// Where showing the editor starts from.
+#[derive(Debug, PartialEq)]
+enum Placement {
+    /// A pane shows the UI client already.
+    Shown(String),
+    /// A parked client goes back beside the tab's only terminal.
+    Reattach {
+        screen: String,
+        anchor: String,
+        anchor_pane: String,
+    },
+    /// A parked client with no single anchor is ended; a new one is split.
+    Replace(String),
+    /// No client: a new one is split.
+    Missing,
+}
+
+/// Pure: the placement for the tab's UI client `screen`.
+fn placement(doc: &doc::Doc, tab: &str, screen: Option<&str>) -> Result<Placement> {
+    let Some(screen) = screen else {
+        return Ok(Placement::Missing);
+    };
+    if doc::pane_of(doc, screen).is_some() {
+        return Ok(Placement::Shown(screen.to_owned()));
+    }
+    let own = doc::terminals_of(doc, tab);
+    if let [anchor] = own.as_slice() {
+        let anchor_pane = doc::pane_of(doc, anchor).context("missing anchor pane")?.0;
+        return Ok(Placement::Reattach {
+            screen: screen.to_owned(),
+            anchor: anchor.clone(),
+            anchor_pane,
+        });
+    }
+    Ok(Placement::Replace(screen.to_owned()))
+}
+
 fn hc(args: &[String]) -> Result<String> {
     let output = Command::new(super::rpc::hc_bin())
         .args(args)
@@ -330,6 +401,25 @@ fn execute(machine: &str, request: &Request, args: &[String]) -> Result<String> 
     hc(&command).with_context(|| format!("remote Neovim on {machine}"))
 }
 
+/// The `-c` command running `code` in a headless Neovim. Neovim exits 0 when
+/// a `-c` command fails and prints the error nowhere we read, so a failure
+/// is written to stdout as `{"error": message}` instead.
+fn helper_command(code: &str) -> String {
+    format!(
+        "lua local ok,e=pcall(function()\n{code}\nend) if not ok then io.stdout:write(vim.json.encode({{error=tostring(e)}})..'\\n') end"
+    )
+}
+
+/// Pure: a helper's stdout to its value, or the helper's own error.
+fn helper_result(text: &str) -> Result<Value> {
+    let value: Value =
+        serde_json::from_str(text).context("remote deployment returned invalid JSON")?;
+    if let Some(error) = value.get("error").and_then(Value::as_str) {
+        bail!("remote helper failed: {error}");
+    }
+    Ok(value)
+}
+
 fn lua(machine: &str, request: &Request, code: &str) -> Result<Value> {
     let text = execute(
         machine,
@@ -339,12 +429,12 @@ fn lua(machine: &str, request: &Request, code: &str) -> Result<Value> {
             "--clean".into(),
             "--headless".into(),
             "-c".into(),
-            format!("lua {code}"),
+            helper_command(code),
             "-c".into(),
             "qa".into(),
         ],
     )?;
-    serde_json::from_str(&text).context("remote deployment returned invalid JSON")
+    helper_result(&text).with_context(|| format!("remote Neovim on {machine}"))
 }
 
 fn deploy(machine: &str, request: &Request) -> Result<String> {
@@ -434,13 +524,9 @@ pub(crate) fn open(
 pub(crate) fn toggle(ctx: &cli::AppCtx, want: sidebar::Want) -> Result<Value> {
     let session = Session::new(ctx)?;
     let (doc, screen) = session.info()?;
-    let shown = screen
-        .as_deref()
-        .is_some_and(|screen| doc::pane_of(&doc, screen).is_some());
-    if want == sidebar::Want::Close || (want == sidebar::Want::Flip && shown) {
-        session.hide(&doc, screen.as_deref())
-    } else {
-        session.show(&doc, screen.as_deref(), &session.call("open")?, true)
+    match toggle_action(want, shown(&doc, screen.as_deref()).is_some()) {
+        Toggle::Hide => session.hide(&doc, screen.as_deref()),
+        Toggle::Show => session.show(&doc, screen.as_deref(), &session.call("open")?, true),
     }
 }
 
@@ -508,17 +594,16 @@ mod tests {
     }
 
     #[test]
-    fn malformed_remote_environment_is_rejected_without_echoing_values() {
+    fn malformed_remote_environment_entries_are_skipped_like_local_ones() {
         let settings = Sidebar {
-            nvim_env: vec!["BAD KEY=private-value".into()],
+            nvim_env: vec!["BAD KEY=private-value".into(), "NVIM_APPNAME=work".into()],
             ..Default::default()
         };
-        let error = Request::new(&ctx(), "box", &settings)
-            .err()
-            .unwrap()
-            .to_string();
-        assert!(error.contains("invalid nvim_env"));
-        assert!(!error.contains("private-value"));
+        let request = Request::new(&ctx(), "box", &settings).unwrap();
+        assert_eq!(
+            request.env,
+            BTreeMap::from([("NVIM_APPNAME".to_owned(), "work".to_owned())])
+        );
     }
 
     #[test]
@@ -539,5 +624,155 @@ mod tests {
         let chunks = upload_chunks(&source);
         assert!(chunks.iter().all(|chunk| chunk.len() <= 768));
         assert_eq!(chunks.concat(), source);
+    }
+
+    #[test]
+    fn a_context_is_remote_by_its_tab_else_its_space_and_mixed_ones_fail_closed() {
+        let local = cli::AppCtx {
+            space: "s1".into(),
+            tab: "t1".into(),
+            ..Default::default()
+        };
+        assert_eq!(machine_of(&local), None);
+        assert_eq!(machine_of(&ctx()), Some("box"));
+        for (space, tab) in [("box/s1", "t1"), ("s1", "box/t1"), ("other/s1", "box/t1")] {
+            let mixed = cli::AppCtx {
+                space: space.into(),
+                tab: tab.into(),
+                ..Default::default()
+            };
+            let machine = machine_of(&mixed).expect("a mixed context stays remote");
+            assert!(Request::new(&mixed, machine, &Sidebar::default()).is_err());
+        }
+    }
+
+    fn terminal(address: &str, state: &str, role: &str) -> RemoteTerminal {
+        RemoteTerminal {
+            address: address.into(),
+            state: state.into(),
+            labels: [("herdr-nvim.remote-role".to_owned(), role.to_owned())].into(),
+        }
+    }
+
+    #[test]
+    fn the_ui_screen_is_the_one_live_ui_client() {
+        assert_eq!(ui_screen(&[]).unwrap(), None);
+        let screens = [
+            terminal("t5", "live", "daemon"),
+            terminal("t6", "ended", "ui"),
+            terminal("t9", "live", "ui"),
+        ];
+        assert_eq!(ui_screen(&screens).unwrap().as_deref(), Some("t9"));
+        let two = [terminal("t8", "live", "ui"), terminal("t9", "live", "ui")];
+        assert!(ui_screen(&two)
+            .unwrap_err()
+            .to_string()
+            .contains("multiple Neovim UI clients"));
+    }
+
+    fn layout(children: Value) -> doc::Doc {
+        doc::parse(&json!({"version":1,"value":{"spaces":[{"id":"s1","tabs":[
+            {"id":"t1","root":{"id":"root","children":children}}]}]}}))
+        .unwrap()
+    }
+
+    #[test]
+    fn only_a_tab_with_another_pane_can_hide_its_editor() {
+        let editor = json!({"id":"p9","content":{"terminal":"t9"}});
+        assert!(!can_hide(&layout(json!([editor])), "t1").unwrap());
+        let with_shell = layout(json!([{"id":"p7","content":{"terminal":"t7"}}, editor]));
+        assert!(can_hide(&with_shell, "t1").unwrap());
+        let with_mod = layout(json!([{"id":"pm","content":{"mod":"board"}}, editor]));
+        assert!(can_hide(&with_mod, "t1").unwrap());
+        assert!(can_hide(&with_mod, "t2").is_err());
+    }
+
+    #[test]
+    fn a_toggle_hides_only_when_asked_or_shown() {
+        use sidebar::Want::*;
+        assert_eq!(toggle_action(Close, false), Toggle::Hide);
+        assert_eq!(toggle_action(Close, true), Toggle::Hide);
+        assert_eq!(toggle_action(Flip, true), Toggle::Hide);
+        assert_eq!(toggle_action(Flip, false), Toggle::Show);
+        assert_eq!(toggle_action(Open, true), Toggle::Show);
+        assert_eq!(toggle_action(Open, false), Toggle::Show);
+    }
+
+    #[test]
+    fn a_parked_client_reattaches_beside_the_only_terminal_else_is_replaced() {
+        let shell = json!({"id":"p7","content":{"terminal":"t7"}});
+        let editor = json!({"id":"p9","content":{"terminal":"t9"}});
+        let shown_doc = layout(json!([shell, editor]));
+        assert_eq!(
+            placement(&shown_doc, "t1", None).unwrap(),
+            Placement::Missing
+        );
+        assert_eq!(
+            placement(&shown_doc, "t1", Some("t9")).unwrap(),
+            Placement::Shown("t9".into())
+        );
+        assert_eq!(shown(&shown_doc, Some("t9")), Some("t9"));
+        let parked = layout(json!([shell]));
+        assert_eq!(shown(&parked, Some("t9")), None);
+        assert_eq!(
+            placement(&parked, "t1", Some("t9")).unwrap(),
+            Placement::Reattach {
+                screen: "t9".into(),
+                anchor: "t7".into(),
+                anchor_pane: "p7".into()
+            }
+        );
+        let two = layout(json!([shell, {"id":"p8","content":{"terminal":"t8"}}]));
+        assert_eq!(
+            placement(&two, "t1", Some("t9")).unwrap(),
+            Placement::Replace("t9".into())
+        );
+    }
+
+    #[test]
+    fn a_helper_error_is_reported_instead_of_invalid_json() {
+        assert_eq!(helper_result("true\n").unwrap(), json!(true));
+        let error = helper_result(r#"{"error":"Unsafe remote runtime directory"}"#).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Unsafe remote runtime directory"));
+        assert!(helper_result("").is_err());
+    }
+
+    /// The real Neovim: a failing `-c` command still exits 0, so the
+    /// wrapper must carry the message on stdout.
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_helper_reaches_stdout_from_a_real_neovim() {
+        let run = |code: &str| {
+            Command::new("nvim")
+                .args([
+                    "--clean",
+                    "--headless",
+                    "-c",
+                    &helper_command(code),
+                    "-c",
+                    "qa",
+                ])
+                .stdin(Stdio::null())
+                .output()
+        };
+        let Ok(failed) = run("assert(false, 'Remote Neovim requires a POSIX host')") else {
+            eprintln!("skipped: no nvim on PATH");
+            return;
+        };
+        assert!(failed.status.success(), "nvim itself fails the run");
+        let error = helper_result(&String::from_utf8_lossy(&failed.stdout)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Remote Neovim requires a POSIX host"),
+            "{error}"
+        );
+        let ok = run("io.stdout:write(vim.json.encode({worker='w'})..'\\n')").unwrap();
+        assert_eq!(
+            helper_result(&String::from_utf8_lossy(&ok.stdout)).unwrap(),
+            json!({"worker": "w"})
+        );
     }
 }

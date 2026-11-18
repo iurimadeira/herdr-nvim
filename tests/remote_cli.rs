@@ -51,7 +51,18 @@ case "$1" in
     test ! -f '{0}/offline' || {{ echo 'machine is unavailable' >&2; exit 1; }}
     while [ "$#" -gt 0 ]; do
       case "$1" in
-        -c) printf '{{"worker":"/remote/worker.lua"}}\n'; exit 0 ;;
+        -c)
+          mkdir -p '{0}/lua'
+          n=$(ls '{0}/lua' | wc -l | tr -d ' ')
+          printf '%s' "$2" > "{0}/lua/$(printf %04d "$n")"
+          test ! -f '{0}/helper-error' || {{ printf '{{"error":"Remote Neovim requires a POSIX host"}}\n'; exit 0; }}
+          case "$2" in
+            *'local sha='*)
+              if test -f '{0}/fresh'; then printf '{{"worker":"/remote/worker.lua","stage":"/remote/.upload-1"}}\n'
+              else printf '{{"worker":"/remote/worker.lua"}}\n'; fi ;;
+            *) printf 'true\n' ;;
+          esac
+          exit 0 ;;
         -l)
           shift; shift
           case "$1" in
@@ -117,6 +128,20 @@ esac
             let hc = self.sandbox.dir.join("bin/hc");
             self.sandbox.run_with_env(
                 &args,
+                None,
+                &[
+                    ("HERDR_NVIM_HOST", "app"),
+                    ("HERDR_APP_BIN", app.to_str().unwrap()),
+                    ("HERDR_NVIM_HC", hc.to_str().unwrap()),
+                ],
+            )
+        }
+
+        fn bare(&self, args: &[&str]) -> Output {
+            let app = self.sandbox.dir.join("bin/herdr-app");
+            let hc = self.sandbox.dir.join("bin/hc");
+            self.sandbox.run_with_env(
+                args,
                 None,
                 &[
                     ("HERDR_NVIM_HOST", "app"),
@@ -369,5 +394,123 @@ esac
             .log("hc.log")
             .contains("env NVIM_APPNAME=work /remote/bin/nvim"));
         assert!(f.log("app.log").contains("NVIM_APPNAME=work"));
+    }
+
+    fn success(result: &Output) -> Value {
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        serde_json::from_slice(&result.stdout).unwrap()
+    }
+
+    #[test]
+    fn a_failing_remote_helper_reports_its_own_message() {
+        let f = Fixture::new("remote-helper-error", false, false);
+        fs::write(f.sandbox.dir.join("helper-error"), "").unwrap();
+        let result = f.run("open", f.ctx(), &["/remote/file"]);
+        assert!(!result.status.success());
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            stderr.contains("Remote Neovim requires a POSIX host"),
+            "{stderr}"
+        );
+        assert!(f.log("app.log").is_empty());
+    }
+
+    #[test]
+    fn a_fresh_machine_receives_the_helper_in_chunks_then_verifies_it() {
+        let f = Fixture::new("remote-upload", false, false);
+        fs::write(f.sandbox.dir.join("fresh"), "").unwrap();
+        success(&f.run("open", f.ctx(), &["/remote/file"]));
+        let dir = f.sandbox.dir.join("lua");
+        let mut names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        names.sort();
+        let scripts: Vec<String> = names
+            .iter()
+            .map(|p| fs::read_to_string(p).unwrap())
+            .collect();
+        let mut uploaded = String::new();
+        let mut last_chunk = 0;
+        for (index, script) in scripts.iter().enumerate() {
+            if !script.contains("'ab'") {
+                continue;
+            }
+            assert!(script.contains("/remote/.upload-1"), "{script}");
+            let at = script.find("f:write(").unwrap() + "f:write(".len();
+            let chunk = serde_json::Deserializer::from_str(&script[at..])
+                .into_iter::<String>()
+                .next()
+                .unwrap()
+                .unwrap();
+            uploaded.push_str(&chunk);
+            last_chunk = index;
+        }
+        assert_eq!(uploaded, include_str!("../lua/herdr-nvim/remote.lua"));
+        let verify = scripts
+            .iter()
+            .position(|s| s.contains("fs_rename") && !s.contains("'ab'"))
+            .expect("the upload is verified and renamed");
+        assert!(verify > last_chunk);
+        assert!(
+            scripts[verify].contains("sha256") && scripts[verify].contains("/remote/worker.lua")
+        );
+    }
+
+    #[test]
+    fn open_with_an_explicit_remote_tab_resolves_its_space_from_the_app() {
+        let f = Fixture::new("remote-open-tab", false, false);
+        let result = f.bare(&["open", "--tab", "box/t1", "/remote/file"]);
+        assert_eq!(success(&result)["terminal"], "box/t9");
+        assert!(
+            f.log("app.log").lines().any(|l| l == "ls"),
+            "{}",
+            f.log("app.log")
+        );
+        let hc = f.log("hc.log");
+        assert!(hc.contains("exec --on box"), "{hc}");
+        assert!(hc.contains("\"space\":\"s1\",\"tab\":\"t1\""), "{hc}");
+    }
+
+    #[test]
+    fn remote_stop_with_an_explicit_tab_stops_that_machines_editor() {
+        let f = Fixture::new("remote-stop-tab", false, false);
+        let result = f.bare(&["app-remote-stop", "--tab", "box/t1"]);
+        assert_eq!(success(&result)["stopped"], true);
+        assert!(
+            f.log("app.log").lines().any(|l| l == "ls"),
+            "{}",
+            f.log("app.log")
+        );
+        let hc = f.log("hc.log");
+        assert!(hc.contains("exec --on box"), "{hc}");
+        assert!(hc.contains("/remote/worker.lua stop"), "{hc}");
+    }
+
+    #[test]
+    fn toggle_without_a_state_hides_a_shown_editor() {
+        let f = Fixture::new("remote-flip-hide", true, false);
+        assert_eq!(success(&f.run("toggle", f.ctx(), &[]))["closed"], "box/t9");
+        assert!(f.log("app.log").contains("terminal.park"));
+        assert!(!f.log("hc.log").contains("worker.lua open"));
+    }
+
+    #[test]
+    fn toggle_without_a_state_shows_a_hidden_editor() {
+        let f = Fixture::new("remote-flip-show", false, false);
+        assert_eq!(
+            success(&f.run("toggle", f.ctx(), &[]))["terminal"],
+            "box/t9"
+        );
+        let app = f.log("app.log");
+        assert!(
+            app.contains("pane.split") && !app.contains("terminal.park"),
+            "{app}"
+        );
+        assert!(f.log("hc.log").contains("worker.lua open"));
     }
 }

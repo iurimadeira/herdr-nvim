@@ -3,9 +3,17 @@
 local M = {}
 local uv = vim.uv or vim.loop
 
+-- Names the program only: arguments and environments may carry private values.
+function M.failure(program, result)
+  local how = result.code == 124 and "timed out (exit code 124)" or ("failed (exit code " .. tostring(result.code) .. ")")
+  local detail = vim.trim(result.stderr or "")
+  if detail == "" then detail = vim.trim(result.stdout or "") end
+  return program .. " " .. how .. (detail ~= "" and (": " .. detail) or "")
+end
+
 local function run(argv, options)
   local r = vim.system(argv, vim.tbl_extend("force", { text = true, timeout = 10000 }, options or {})):wait()
-  if r.code ~= 0 then error(vim.trim(r.stderr or r.stdout or "command failed")) end
+  if r.code ~= 0 then error(M.failure(argv[1], r), 0) end
   return r.stdout or ""
 end
 
@@ -16,7 +24,7 @@ local function core(method, params)
   for line in text:gmatch("[^\n]+") do
     local reply = vim.json.decode(line)
     if reply.id == 2 then
-      if reply.error then error(reply.error.message) end
+      if reply.error then error(tostring(reply.error.message or ("herdr-core refused " .. method)), 0) end
       return reply.result
     end
   end
@@ -83,12 +91,23 @@ function M.dead_owner(meta, is_alive)
   return type(meta) == "table" and type(meta.pid) == "number" and meta.pid > 0 and not is_alive(meta.pid)
 end
 
+M.START_GRACE = 30
+
+-- A live daemon without a socket is starting only for a while; past that it
+-- lost its socket and only `stop` can end it.
+function M.unsocketed(meta, is_alive, now)
+  if type(meta) ~= "table" or type(meta.pid) ~= "number" or meta.pid <= 0 or not is_alive(meta.pid) then
+    return { running = false, starting = false }
+  end
+  if type(meta.started) == "number" and now - meta.started < M.START_GRACE then
+    return { running = false, starting = true }
+  end
+  return { running = false, starting = false, orphan = true }
+end
+
 local function snapshot(ctx)
   local base = paths(ctx)
-  if not uv.fs_stat(base .. ".sock") then
-    local meta = metadata(base)
-    return { running = false, starting = meta and alive(meta.pid) or false }
-  end
+  if not uv.fs_stat(base .. ".sock") then return M.unsocketed(metadata(base), alive, os.time()) end
   local ok, result = pcall(evaluate, ctx, [[(function()
     local modified = {}
     for _, b in ipairs(vim.fn.getbufinfo({bufmodified=1})) do modified[#modified+1] = b.name end
@@ -140,20 +159,32 @@ local function terminals(ctx)
   return core("terminal.list", { labels = { ["herdr-nvim.remote"] = ctx.key } }).terminals
 end
 
+M.LOCK_GRACE = 5
+
+-- The lock is created before its PID is written, so a lock without one is
+-- held only until a kill between the two could have left it behind.
+function M.stale_lock(text, age, is_alive)
+  local pid = tonumber(text)
+  if pid and pid > 0 and pid % 1 == 0 then return not is_alive(pid) end
+  return age > M.LOCK_GRACE
+end
+
 local function ensure(ctx, script)
   local base = paths(ctx)
   local lock = base .. ".lock"
   local fd = uv.fs_open(lock, "wx", 384)
   if not fd then
-    local pid = tonumber(read(lock))
-    if not pid or alive(pid) then error("Another remote Neovim action is running for this tab") end
-    assert(uv.fs_unlink(lock)); fd = assert(uv.fs_open(lock, "wx", 384))
+    local stat = uv.fs_stat(lock)
+    local age = stat and os.time() - stat.mtime.sec or math.huge
+    if not M.stale_lock(read(lock), age, alive) then error("Another remote Neovim action is running for this tab") end
+    uv.fs_unlink(lock); fd = assert(uv.fs_open(lock, "wx", 384))
   end
   uv.fs_write(fd, tostring(uv.os_getpid())); uv.fs_close(fd)
   local ok, result = xpcall(function()
     local state = snapshot(ctx)
     if state.running then return state end
     assert(not state.starting, "The existing remote Neovim is still starting; no replacement was started")
+    assert(not state.orphan, "The remote Neovim lost its socket; run herdr-nvim app-remote-stop, then open it again")
     if state.stale then uv.fs_unlink(base .. ".sock"); uv.fs_unlink(base .. ".json") end
     for _, t in ipairs(terminals(ctx)) do
       if t.state == "live" and t.labels["herdr-nvim.remote-role"] == "daemon" then
@@ -178,6 +209,24 @@ function M.daemon_argv(ctx)
   return { ctx.nvim, "--headless", "--listen", paths(ctx) .. ".sock" }
 end
 
+-- One watchdog poll. Only a readable document without the tab closes it; a
+-- problem is logged when it starts or changes, not on every poll.
+function M.watch(last, ok, tab)
+  local problem
+  if not ok then
+    problem = "cannot read the layout document: " .. tostring(tab)
+  elseif tab == nil then
+    problem = "the layout document is unavailable or unfamiliar"
+  end
+  local line
+  if problem and problem ~= last then
+    line = "herdr-nvim watchdog: " .. problem .. "\n"
+  elseif not problem and last then
+    line = "herdr-nvim watchdog: the layout document is readable again\n"
+  end
+  return ok and tab == false, line, problem
+end
+
 local function serve(ctx)
   local base = paths(ctx)
   local log = assert(io.open(base .. ".log", "w"))
@@ -188,16 +237,20 @@ local function serve(ctx)
     stdout = function(_, data) if data then log:write(data); log:flush() end end,
     stderr = function(_, data) if data then log:write(data); log:flush() end end,
   }, function(result) log:write("\nNeovim exit code " .. result.code .. "\n"); done = true end)
-  write(base .. ".json", { pid = job.pid })
+  write(base .. ".json", { pid = job.pid, started = os.time() })
   local signals = {}
   for _, name in ipairs({ "sigterm", "sighup" }) do
     local signal = uv.new_signal()
     signal:start(name, function() stopping = true end)
     signals[#signals+1] = signal
   end
+  local problem
   while not done and not stopping do
     local ok, tab = pcall(function() return M.find_tab(core("doc.get", { name = "herdr-app" }), ctx.space, ctx.tab) end)
-    if ok and tab == false then break end
+    local closed, line
+    closed, line, problem = M.watch(problem, ok, tab)
+    if line then log:write(line); log:flush() end
+    if closed then break end
     vim.wait(5000, function() return done or stopping end, 100)
   end
   if not done then
@@ -214,6 +267,20 @@ local function request(op, ctx, script)
   if op == "stop" then
     local state = snapshot(ctx)
     assert(not state.running or #state.modified == 0, "Save the remote Neovim's unsaved buffers before stopping it")
+    if state.orphan then
+      -- Without a socket its buffers cannot be checked; ending the daemon
+      -- terminal stops Neovim with SIGTERM, which keeps its swap files.
+      local base = paths(ctx)
+      local ended = false
+      for _, t in ipairs(terminals(ctx)) do
+        if t.state == "live" and t.labels["herdr-nvim.remote-role"] == "daemon" then
+          core("terminal.kill", { terminal = t.address }); ended = true
+        end
+      end
+      if not ended then uv.fs_unlink(base .. ".json") end
+      assert(vim.wait(4000, function() return uv.fs_stat(base .. ".json") == nil end, 100),
+        "Remote Neovim did not stop; inspect " .. base .. ".log")
+    end
     if state.running then
       run({ ctx.nvim, "--clean", "--headless", "--server", state.socket, "--remote-send", "<C-\\><C-n><Cmd>qa<CR>" })
       assert(vim.wait(4000, function() return uv.fs_stat(state.socket) == nil end, 100),

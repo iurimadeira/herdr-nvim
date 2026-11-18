@@ -22,8 +22,10 @@ fn is_valid_env_key(key: &str) -> bool {
 pub struct Config {
     #[serde(default)]
     pub sidebar: Sidebar,
-    /// Per-machine Neovim settings; local executable paths must not leak to a remote host.
-    #[serde(default)]
+    /// Per-machine Neovim settings; local executable paths must not leak to a
+    /// remote host. Read leniently, like `[app]`: a bad value degrades only
+    /// that machine's field.
+    #[serde(default, deserialize_with = "lenient_remote")]
     pub remote: BTreeMap<String, Remote>,
     #[serde(default)]
     pub picker: Picker,
@@ -31,14 +33,105 @@ pub struct Config {
     pub app: App,
 }
 
-#[derive(Deserialize, PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug)]
 pub struct Remote {
-    #[serde(default = "default_nvim_bin")]
     pub nvim_bin: String,
-    #[serde(default)]
     pub nvim_env: Vec<String>,
-    #[serde(default)]
     pub position: Option<SidebarPosition>,
+}
+
+impl Default for Remote {
+    fn default() -> Self {
+        Self {
+            nvim_bin: default_nvim_bin(),
+            nvim_env: Vec::new(),
+            position: None,
+        }
+    }
+}
+
+fn lenient_remote<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<BTreeMap<String, Remote>, D::Error> {
+    let value = toml::Value::deserialize(d)?;
+    let Some(table) = value.as_table() else {
+        eprintln!("herdr-nvim: config: [remote] is not a table of machines; ignoring it");
+        return Ok(BTreeMap::new());
+    };
+    Ok(table
+        .iter()
+        .map(|(machine, value)| {
+            let (remote, warnings) = Remote::from_toml(machine, value);
+            for warning in warnings {
+                eprintln!("herdr-nvim: config: {warning}");
+            }
+            (machine.clone(), remote)
+        })
+        .collect())
+}
+
+impl Remote {
+    /// Pure: one `[remote.<machine>]` table, each bad field at its default,
+    /// with a warning for each. Warnings never quote `nvim_env` values.
+    fn from_toml(machine: &str, value: &toml::Value) -> (Self, Vec<String>) {
+        let mut remote = Self::default();
+        let mut warnings = Vec::new();
+        let Some(table) = value.as_table() else {
+            warnings.push(format!(
+                "[remote.{machine}] is not a table; using the defaults"
+            ));
+            return (remote, warnings);
+        };
+        if let Some(bin) = table.get("nvim_bin") {
+            match bin.as_str() {
+                Some(bin) => remote.nvim_bin = bin.to_owned(),
+                None => warnings.push(format!(
+                    "[remote.{machine}] nvim_bin is a path (a string); using \"nvim\""
+                )),
+            }
+        }
+        if let Some(env) = table.get("nvim_env") {
+            match env
+                .as_array()
+                .and_then(|list| list.iter().map(|e| e.as_str().map(str::to_owned)).collect())
+            {
+                Some(list) => remote.nvim_env = list,
+                None => warnings.push(format!(
+                    "[remote.{machine}] nvim_env is a list of KEY=VALUE strings; using none"
+                )),
+            }
+        }
+        if let Some(position) = table.get("position") {
+            match SidebarPosition::deserialize(position.clone()) {
+                Ok(position) => remote.position = Some(position),
+                Err(_) => warnings.push(format!(
+                    "[remote.{machine}] position is left, right, top or bottom; using [sidebar]'s"
+                )),
+            }
+        }
+        (remote, warnings)
+    }
+}
+
+/// Pure: the warning for `section`'s malformed `nvim_env` entries, naming
+/// them by position only (a value may be private).
+fn invalid_env_warning(section: &str, entries: &[String]) -> Option<String> {
+    let invalid: Vec<String> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            entry
+                .split_once('=')
+                .is_none_or(|(key, _)| !is_valid_env_key(key))
+        })
+        .map(|(index, _)| format!("#{}", index + 1))
+        .collect();
+    (!invalid.is_empty()).then(|| {
+        format!(
+            "herdr-nvim: ignoring invalid {section}.nvim_env entries {} (each must be KEY=VALUE with an ASCII alphanumeric/_ key)",
+            invalid.join(", ")
+        )
+    })
 }
 
 impl Config {
@@ -168,8 +261,9 @@ impl Sidebar {
     /// applied to every `nvim_cmd` caller. Each is an env var on the child
     /// (an unordered set; duplicate keys resolve to the last value written).
     /// Malformed entries (no `=`, or a key that is not an env-style name) are
-    /// skipped; `load()` warns about them once so a typo degrades to default
-    /// behavior instead of breaking the sidebar.
+    /// skipped, for `[sidebar]` and every `[remote.<machine>]` alike; `load()`
+    /// warns about them once so a typo degrades to default behavior instead
+    /// of breaking the sidebar or the remote editor.
     pub(crate) fn env_override(&self) -> Vec<(&str, &str)> {
         self.nvim_env
             .iter()
@@ -273,22 +367,16 @@ pub fn load() -> Config {
     let parsed: Result<Config, toml::de::Error> = toml::from_str(&raw);
     match parsed {
         Ok(config) => {
-            let invalid: Vec<&str> = config
-                .sidebar
-                .nvim_env
-                .iter()
-                .filter(|entry| {
-                    entry
-                        .split_once('=')
-                        .is_none_or(|(key, _)| !is_valid_env_key(key))
-                })
-                .map(String::as_str)
-                .collect();
-            if !invalid.is_empty() {
-                eprintln!(
-                    "herdr-nvim: ignoring invalid sidebar.nvim_env entries: {} (each must be KEY=VALUE with an ASCII alphanumeric/_ key)",
-                    invalid.join(", ")
-                );
+            let sections = std::iter::once(("sidebar".to_owned(), &config.sidebar.nvim_env)).chain(
+                config
+                    .remote
+                    .iter()
+                    .map(|(machine, remote)| (format!("remote.{machine}"), &remote.nvim_env)),
+            );
+            for (section, entries) in sections {
+                if let Some(warning) = invalid_env_warning(&section, entries) {
+                    eprintln!("{warning}");
+                }
             }
             config
         }
@@ -480,5 +568,51 @@ mod tests {
             (config.app.tree, config.app.tree_key.as_str()),
             (TreeMode::Nvim, "")
         );
+    }
+
+    #[test]
+    fn a_bad_remote_value_degrades_only_that_machines_field() {
+        let config: Config = toml::from_str(
+            "[sidebar]\nnvim_bin = '/opt/nvim'\nposition = 'left'\n[picker]\nmax_files = 7\n[remote.box]\nnvim_bin = '/remote/nvim'\nposition = 'middle'\n[remote.lab]\nnvim_bin = 5\nnvim_env = 'NVIM_APPNAME=work'\nposition = 'top'\n",
+        )
+        .unwrap();
+        assert_eq!(config.sidebar.nvim_bin, "/opt/nvim");
+        assert_eq!(config.picker.max_files, 7);
+        let boxed = config.remote_sidebar("box");
+        assert_eq!(boxed.nvim_bin, "/remote/nvim");
+        assert_eq!(boxed.position, SidebarPosition::Left);
+        let lab = config.remote_sidebar("lab");
+        assert_eq!(lab.nvim_bin, "nvim");
+        assert!(lab.nvim_env.is_empty());
+        assert_eq!(lab.position, SidebarPosition::Top);
+
+        let (_, warnings) =
+            Remote::from_toml("box", &toml::from_str("position = 'middle'\n").unwrap());
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("[remote.box] position"),
+            "{warnings:?}"
+        );
+        let (remote, warnings) = Remote::from_toml("box", &toml::Value::Integer(3));
+        assert_eq!((remote, warnings.len()), (Remote::default(), 1));
+        let config: Config = toml::from_str("remote = 3\n[picker]\nmax_files = 7\n").unwrap();
+        assert!(config.remote.is_empty());
+        assert_eq!(config.picker.max_files, 7);
+    }
+
+    #[test]
+    fn invalid_env_entries_are_named_without_their_values() {
+        let entries = vec![
+            "NVIM_APPNAME=work".to_owned(),
+            "BAD KEY=private-value".to_owned(),
+            "private-token".to_owned(),
+        ];
+        let warning = invalid_env_warning("remote.box", &entries).unwrap();
+        assert!(
+            warning.contains("remote.box.nvim_env entries #2, #3"),
+            "{warning}"
+        );
+        assert!(!warning.contains("private"), "{warning}");
+        assert_eq!(invalid_env_warning("sidebar", &entries[..1]), None);
     }
 }

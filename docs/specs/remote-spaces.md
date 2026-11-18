@@ -146,8 +146,10 @@ the fork is synced with `upstream/main` periodically.
 - **Known test failures:** 4 daemon process-group tests already fail on lab on
   `upstream/main` and are unrelated. They are not regressions of this work.
 - **Rollout:** each change lands on the fork's `main` through a PR. On the Mac,
-  the user installs the dev-build artifact with
-  `herdr-app/install.sh --binary <path>`, then runs
+  the user extracts the dev-build artifact's
+  `herdr-nvim-app-aarch64-apple-darwin.tar.gz` and installs it with
+  `herdr-nvim-app-aarch64-apple-darwin/herdr-app/install.sh --binary herdr-nvim-app-aarch64-apple-darwin/bin/herdr-nvim`
+  (the binary needs the bundle's `lua/`, `plugin/` and `herdr-app/` beside it), then runs
   `chezmoi re-add ~/.config/herdr-app/keys.json ~/.config/herdr-app/layouts/iuri.json`.
   The resulting dotfiles diff is reviewed and committed. On lab, the user runs
   `cargo install` from the same fork revision.
