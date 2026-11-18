@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.4.0](https://github.com/iurimadeira/herdr-nvim/compare/v1.3.1...v1.4.0) (2026-11-18)
+
+
+### Features
+
+* **app:** draw mermaid diagrams in the markdown preview ([#76](https://github.com/iurimadeira/herdr-nvim/issues/76)) ([06127e9](https://github.com/iurimadeira/herdr-nvim/commit/06127e9312382eb9cb806cb5a2b0e2ef6eb7b63c))
+* **app:** install and run herdr-nvim in the Herdr app on Windows ([#81](https://github.com/iurimadeira/herdr-nvim/issues/81)) ([2905408](https://github.com/iurimadeira/herdr-nvim/commit/2905408e1985db1a319b466ba9873f40e29f5e7a))
+* **app:** remote spaces fork base (remote editor pane) ([4ffc42c](https://github.com/iurimadeira/herdr-nvim/commit/4ffc42ce037e4f02e7005f5828cc0582969e15be))
+* **app:** support remote Neovim editor panes ([106430e](https://github.com/iurimadeira/herdr-nvim/commit/106430e0ca0fab2ecb3781c7e5916d7b96d6e64c))
+
+
+### Bug Fixes
+
+* **app:** address review of remote editor panes ([4705ab5](https://github.com/iurimadeira/herdr-nvim/commit/4705ab5a977255f5d2bb583bc4d9ba8491f83e9b))
+* **app:** never report a forced remote stop it could not verify ([6428fe0](https://github.com/iurimadeira/herdr-nvim/commit/6428fe0399b4a761c606011f06c6e125a4b3208f))
+* **app:** size the markdown preview from the app's font size ([#75](https://github.com/iurimadeira/herdr-nvim/issues/75)) ([50b87a6](https://github.com/iurimadeira/herdr-nvim/commit/50b87a6219c148fd102b239e02071d54b53c385b))
+* **app:** stop orphaned remote editors only with --force ([9682096](https://github.com/iurimadeira/herdr-nvim/commit/9682096c722c457ea8752e9bc7fe9a764ee4fb01))
+* **windows:** install the plugin without Visual Studio 2022 ([#79](https://github.com/iurimadeira/herdr-nvim/issues/79)) ([1bc902b](https://github.com/iurimadeira/herdr-nvim/commit/1bc902b6e5f1d7e56fd1480f6ec44d4bfee5e96e))
+
 ## [1.3.1](https://github.com/ChmaraX/herdr-nvim/compare/v1.3.0...v1.3.1) (2026-11-06)
 
 
