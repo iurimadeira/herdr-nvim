@@ -269,3 +269,63 @@ T.test("remote: a forced stop of a daemon terminal waits for it to end, not for 
   remote.STOP_WAIT = old
   T.ok(not ok); T.ok(tostring(err):find("did not stop", 1, true), err)
 end)
+
+local function with_args(answers, f)
+  local real, n = remote.process_args, 0
+  remote.process_args = function(pid)
+    n = n + 1
+    local a = answers[math.min(n, #answers)]
+    if a == "real" then return real(pid) end
+    return a or nil
+  end
+  local ok, err = pcall(f)
+  remote.process_args = real
+  if not ok then error(err, 0) end
+end
+
+T.test("remote: a forced stop fails, keeping the files, when the recorded PID cannot be checked", function()
+  if vim.fn.has("win32") == 1 then return end
+  local meta, job = fake_daemon()
+  with_args({ false }, function()
+    local ok, err, _, killed, left = orphan_stop(meta, { force = true, daemons = { "t5" } })
+    T.ok(not ok)
+    T.ok(tostring(err):find("process " .. job().pid, 1, true), err)
+    T.eq(killed, {}, "nothing is ended before the PID is checked")
+    T.ok(left, "the metadata is kept")
+  end)
+  T.ok((vim.uv or vim.loop).kill(job().pid, 0) == 0, "an unchecked PID is never signalled")
+  job():kill(9)
+end)
+
+T.test("remote: a forced stop re-checks the recorded PID before SIGKILL", function()
+  if vim.fn.has("win32") == 1 then return end
+  local uv = vim.uv or vim.loop
+  local stubborn = function()
+    local job
+    return function(base)
+      job = real_system({ "sh", "-c", "trap '' TERM; sleep 30; true", "--listen", base .. ".sock" })
+      return { pid = job.pid, started = 0 }
+    end, function() return job end
+  end
+  local old = remote.STOP_WAIT
+  remote.STOP_WAIT = 300
+  local meta, job = stubborn()
+  local ok, err, _, _, left
+  with_args({ "real", false }, function() ok, err, _, _, left = orphan_stop(meta, { force = true }) end)
+  T.ok(not ok, "forced stop of an unverifiable PID must fail")
+  T.ok(tostring(err):find("process " .. job().pid, 1, true), err)
+  T.ok(left, "the metadata is kept")
+  T.ok(uv.kill(job().pid, 0) == 0, "no SIGKILL to a PID that can no longer be checked")
+  job():kill(9)
+  meta, job = stubborn()
+  with_args({ "real" }, function() ok, err, _, _, left = orphan_stop(meta, { force = true }) end)
+  remote.STOP_WAIT = old
+  T.ok(ok, err); T.ok(not left)
+  T.eq(uv.kill(job().pid, 0), nil, "a PID still the daemon gets SIGKILL")
+end)
+
+T.test("remote: process arguments come from /proc or ps", function()
+  if vim.fn.has("win32") == 1 then return end
+  local args = remote.process_args((vim.uv or vim.loop).os_getpid())
+  T.ok(args and args:find("nvim", 1, true), args)
+end)

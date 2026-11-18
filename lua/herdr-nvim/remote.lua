@@ -310,27 +310,53 @@ local function serve(ctx)
   log:close()
 end
 
+-- A process's command line: /proc where there is one, else `ps`; nil when
+-- neither can tell (no `ps`, or one without `-p`, as BusyBox's).
+function M.process_args(pid)
+  local text = read("/proc/" .. pid .. "/cmdline")
+  if text and text ~= "" then return (text:gsub("%z", " ")) end
+  local ok, args = pcall(run, { "ps", "-o", "args=", "-p", tostring(pid) })
+  return ok and args ~= "" and args or nil
+end
+
+-- Whether a recorded PID is still the daemon's Neovim: "gone", "ours",
+-- "other" (the PID was reused) or "unknown". Only "ours" may be signalled,
+-- and only "gone" or "other" let a stop forget it.
+local function ownership(pid, socket)
+  if not alive(pid) then return "gone" end
+  local args = M.process_args(pid)
+  if args then return M.owns(args, socket) and "ours" or "other" end
+  return alive(pid) and "unknown" or "gone"
+end
+
+local function unverified(pid, base)
+  error("Cannot tell whether process " .. pid .. " is still the remote Neovim (no /proc and no usable ps); "
+    .. "end it by hand if it is, then stop again. Its files are kept: " .. base .. ".json", 0)
+end
+
 -- Ends an orphan: its daemon terminals (serve stops Neovim with SIGTERM,
--- which keeps swap files) and its recorded Neovim, when that PID is still it.
--- Done only once neither is alive; their files are then stale.
+-- which keeps swap files) and its recorded Neovim, while that PID is still
+-- it. Done only once neither is alive; their files are then stale.
 local function kill(ctx, base, plan)
-  for _, address in ipairs(plan.terminals) do core("terminal.kill", { terminal = address }) end
+  local socket = base .. ".sock"
   local pid = plan.pid
-  if pid and alive(pid) then
-    local ok, args = pcall(run, { "ps", "-o", "args=", "-p", tostring(pid) })
-    if not (ok and M.owns(args, base .. ".sock")) then pid = nil end
-  else
-    pid = nil
-  end
+  local owner = pid and ownership(pid, socket) or "gone"
+  if owner == "unknown" then unverified(pid, base) end
+  if owner ~= "ours" then pid = nil end
+  for _, address in ipairs(plan.terminals) do core("terminal.kill", { terminal = address }) end
   if pid then uv.kill(pid, 15) end
   local function gone()
     return not (pid and alive(pid)) and #M.live_daemons(terminals(ctx)) == 0
   end
   if not vim.wait(M.STOP_WAIT, gone, 250) then
-    if pid and alive(pid) then uv.kill(pid, 9) end
+    if pid then
+      owner = ownership(pid, socket)
+      if owner == "unknown" then unverified(pid, base) end
+      if owner == "ours" then uv.kill(pid, 9) else pid = nil end
+    end
     assert(vim.wait(2000, gone, 250), "Remote Neovim did not stop; inspect " .. base .. ".log")
   end
-  uv.fs_unlink(base .. ".sock"); uv.fs_unlink(base .. ".json")
+  uv.fs_unlink(socket); uv.fs_unlink(base .. ".json")
 end
 
 local function stop(ctx)
