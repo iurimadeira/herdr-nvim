@@ -397,6 +397,33 @@ assert.deepEqual(app.ran, [], "remote toggles must use the machine-aware Rust pa
 await remoteSync.startSwap("box/t1", "/remote/image.png", { notify() {} });
 assert.deepEqual(app.ran, [], "unsupported remote previews must not create local preview panes");
 
+// The Files panel on a remote tab follows the local rule: shown where the
+// tab's nvim (there) is, kept when Files opens it, but Files never starts
+// nvim on the machine (`local`).
+assert.deepEqual(wanted(tab(true, false), tab(false, false), { ...opts, local: false }), { kept: false, nvim: false });
+app.terminals = [{ address: "box/t9", state: "live", labels: { "herdr-nvim.sidebar": "t1" } }];
+app.panes = [{ pane: "box/p9", terminal: "box/t9", tab: "box/t1" }];
+app.layout = stack("files", true);
+app.exec = async (_cmd, args) => assert.fail(`no herdr-nvim ${args[0]} for a remote tab's panel`);
+app.ran = [];
+const remoteLook = new Sync(cx);
+remoteLook.look(cx); // the remote nvim without its tree: show the panel
+assert.deepEqual(app.ran.map(([name]) => name), ["layout.select", "layout.show"]);
+app.layout = stack("files");
+remoteLook.look(cx);
+await new Promise((done) => setTimeout(done, 20));
+app.terminals = [];
+app.panes = [];
+app.layout = stack("files", true);
+app.ran = [];
+const remoteFiles0 = new Sync(cx);
+remoteFiles0.look(cx); // no nvim, no panel
+app.layout = stack("files"); // Files pressed
+remoteFiles0.look(cx);
+remoteFiles0.look(cx);
+await new Promise((done) => setTimeout(done, 20));
+assert.deepEqual(app.ran, [], "Files on a remote tab shows the tree and starts no nvim there");
+
 // A remote tab's tree: its machine's herdr-nvim lists and reads git there
 // (src/app/companion.rs), the same output a local tree reads here, so the
 // rows and marks are a local tree's.

@@ -311,7 +311,9 @@ copy of it, else clones it once (`<name>-copy`), and switches to it.
   the keyboard again for 2 s after each arrival (herdrdev/herdr-app#362,
   fixed upstream, not released yet).
 - Remote POSIX hosts need Neovim 0.10+ and hc. `cmd-e` and `open --tab
-  <machine/tab>` use their own Neovim config/explorer. The native tree lists
+  <machine/tab>` use their own Neovim config. The Files panel follows a remote
+  tab's nvim by the local rule (`sync.js`), but Files never starts it there
+  (`local`). The native tree lists
   a remote tab's files through the companion (above), rooted by the local
   rule, revealing nvim's file when it gets the keyboard but not following it;
   its search and file operations, the picker, annotations and rendered

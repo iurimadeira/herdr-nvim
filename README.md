@@ -94,8 +94,10 @@ The first nvim pane shows a welcome with these keys, once
 ## Remote tabs
 
 On a connected remote machine, `cmd-e` opens or hides that tab's remote Neovim.
-The editor loads the remote host's normal configuration, plugins and keymaps;
-use its own explorer inside the pane. Hiding preserves buffers, undo and cursor
+The editor loads the remote host's normal configuration, plugins and keymaps.
+The Files panel follows it as on a local tab (shown where the tab's Neovim
+is, hidden where it is not), but pressing Files there never starts the remote
+Neovim. Hiding preserves buffers, undo and cursor
 state. Closing the Herdr tab stops its daemon, so save first.
 
 POSIX remote hosts need Neovim 0.10+ and `hc` on their core's PATH. The
