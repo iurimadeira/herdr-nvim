@@ -49,6 +49,14 @@ case "$1" in
   exec)
     test "$2" = --on && test "$3" = box || exit 21
     test ! -f '{0}/offline' || {{ echo 'machine is unavailable' >&2; exit 1; }}
+    case " $* " in
+      *' -- herdr-nvim '*)
+        while [ "$1" != herdr-nvim ]; do shift; done
+        shift
+        test ! -f '{0}/no-companion' || {{ printf '{{"error":{{"hint":"","kind":"spawn_failed","message":"cannot start herdr-nvim: No such file or directory (os error 2)"}}}}\n' >&2; exit 1; }}
+        if [ "$1" = app-version ] && [ -f '{0}/companion.json' ]; then cat '{0}/companion.json'; exit 0; fi
+        exec env -u HERDR_NVIM_HOST -u HERDR_APP_BIN -u HERDR_NVIM_HC '{1}' "$@" ;;
+    esac
     while [ "$#" -gt 0 ]; do
       case "$1" in
         -c)
@@ -84,7 +92,8 @@ case "$1" in
   *) echo 'local core calls are forbidden in this fixture' >&2; exit 24 ;;
 esac
 "#,
-                        root.display()
+                        root.display(),
+                        env!("CARGO_BIN_EXE_herdr-nvim")
                     ),
                 ),
                 (
@@ -526,5 +535,160 @@ esac
             "{app}"
         );
         assert!(f.log("hc.log").contains("worker.lua open"));
+    }
+
+    fn project(f: &Fixture) -> String {
+        let dir = f.sandbox.dir.join("project");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::create_dir_all(dir.join("target")).unwrap();
+        fs::create_dir_all(dir.join("newdir")).unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                ok.status.success(),
+                "{}",
+                String::from_utf8_lossy(&ok.stderr)
+            );
+        };
+        git(&["init", "-q"]);
+        fs::write(dir.join(".gitignore"), "target/\n").unwrap();
+        fs::write(dir.join("src/a.rs"), "one").unwrap();
+        fs::write(dir.join("README.md"), "x").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "init"]);
+        fs::write(dir.join("src/a.rs"), "two").unwrap();
+        fs::write(dir.join(".env"), "x").unwrap();
+        fs::write(dir.join("target/out"), "x").unwrap();
+        fs::write(dir.join("newdir/n.txt"), "x").unwrap();
+        fs::remove_file(dir.join("README.md")).unwrap();
+        dir.to_str().unwrap().to_owned()
+    }
+
+    fn companion_calls(f: &Fixture) -> Vec<String> {
+        f.log("hc.log")
+            .lines()
+            .map(|line| {
+                let (_, after) = line.split_once(" -- ").expect("an exec on box");
+                assert!(line.starts_with("exec --on box --timeout "), "{line}");
+                after.to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_remote_listing_and_its_git_status_are_the_companions_after_the_handshake() {
+        let f = Fixture::new("remote-companion-tree", false, false);
+        let dir = project(&f);
+        for mode in ["app-list", "app-git-status"] {
+            fs::remove_file(f.sandbox.dir.join("hc.log")).ok();
+            let local = f.bare(&[mode, &dir]);
+            assert!(
+                local.status.success(),
+                "{}",
+                String::from_utf8_lossy(&local.stderr)
+            );
+            assert!(f.log("hc.log").is_empty(), "a local {mode} runs here");
+            let remote = f.run(mode, f.ctx(), &[&dir]);
+            assert!(
+                remote.status.success(),
+                "{}",
+                String::from_utf8_lossy(&remote.stderr)
+            );
+            assert_eq!(remote.stdout, local.stdout, "{mode}");
+            assert_eq!(
+                companion_calls(&f),
+                [
+                    "herdr-nvim app-version".to_owned(),
+                    format!("herdr-nvim {mode} {dir}"),
+                ]
+            );
+        }
+        let status: Value =
+            serde_json::from_slice(&f.bare(&["app-git-status", &dir]).stdout).unwrap();
+        assert_eq!(status["top"], json!(dir));
+        let text = status["status"].as_str().unwrap();
+        for entry in [" M src/a.rs", " D README.md", "?? newdir/", "?? .env"] {
+            assert!(text.split('\0').any(|e| e == entry), "{entry} in {text:?}");
+        }
+        assert!(f.log("app.log").is_empty());
+    }
+
+    #[test]
+    fn a_local_context_lists_here_without_hc() {
+        let f = Fixture::new("remote-companion-local", false, false);
+        let dir = project(&f);
+        let ctx = json!({"space":"s1","tab":"t1","cwd":dir});
+        let result = f.run("app-list", ctx, &[&dir]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(result.stdout, f.bare(&["app-list", &dir]).stdout);
+        assert!(f.log("hc.log").is_empty());
+    }
+
+    #[test]
+    fn a_mixed_machine_context_is_refused_before_the_companion_is_asked() {
+        let f = Fixture::new("remote-companion-mixed", false, false);
+        let ctx = json!({"space":"other/s1","tab":"box/t1","terminal":"box/t7","cwd":"/remote"});
+        let result = f.run("app-list", ctx, &["/remote"]);
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("different machine"));
+        assert!(f.log("hc.log").is_empty());
+    }
+
+    fn companion_error(result: &Output) -> Value {
+        assert_eq!(
+            result.status.code(),
+            Some(4),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let out: Value = serde_json::from_slice(&result.stdout).unwrap();
+        out["companion"].clone()
+    }
+
+    #[test]
+    fn a_companion_of_another_build_is_refused_before_any_work() {
+        let f = Fixture::new("remote-companion-mismatch", false, false);
+        fs::write(
+            f.sandbox.dir.join("companion.json"),
+            r#"{"version":"0.9.0","rev":"0123456789012345678901234567890123456789"}"#,
+        )
+        .unwrap();
+        let error = companion_error(&f.run("app-list", f.ctx(), &["/remote"]));
+        assert_eq!(error["machine"], "box");
+        assert_eq!(error["problem"], "mismatch");
+        assert_eq!(error["found"]["version"], "0.9.0");
+        assert_eq!(error["expected"]["version"], env!("CARGO_PKG_VERSION"));
+        assert!(error["install"]
+            .as_str()
+            .unwrap()
+            .starts_with("cargo install"));
+        assert_eq!(companion_calls(&f), ["herdr-nvim app-version"]);
+    }
+
+    #[test]
+    fn a_missing_companion_is_reported_with_its_install_command() {
+        let f = Fixture::new("remote-companion-missing", false, false);
+        fs::write(f.sandbox.dir.join("no-companion"), "").unwrap();
+        let result = f.run("app-git-status", f.ctx(), &["/remote"]);
+        let error = companion_error(&result);
+        assert_eq!(error["machine"], "box");
+        assert_eq!(error["problem"], "missing");
+        assert!(error["found"].is_null());
+        assert!(error["install"]
+            .as_str()
+            .unwrap()
+            .contains("--git https://github.com/iurimadeira/herdr-nvim"));
+        assert!(String::from_utf8_lossy(&result.stderr).contains("box"));
+        assert_eq!(companion_calls(&f), ["herdr-nvim app-version"]);
     }
 }
