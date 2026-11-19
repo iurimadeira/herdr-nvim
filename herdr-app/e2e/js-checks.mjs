@@ -399,11 +399,13 @@ const remoteCtx = { space: "box/s1", tab: "box/t1", terminal: null, cwd: "/remot
 const remoteFiles = { "/remote": [entry("src", true), entry("x.md")] };
 let remoteCalls = [];
 let companion = null;
+let goneOnMachine = null;
 app.exec = async (cmd, args) => {
   assert.equal(cmd, bin);
   assert.deepEqual(args.slice(-2), ["--ctx", JSON.stringify(remoteCtx)]);
   remoteCalls.push(args.slice(0, 2));
   if (companion) return { code: 4, stdout: JSON.stringify({ companion }), stderr: `herdr-nvim: ${companion.message}\n` };
+  if (args[1] === goneOnMachine) return { code: 1, stdout: "", stderr: `herdr-nvim: box: not a folder: ${goneOnMachine}\n` };
   if (args[0] === "app-git-status") return ok(JSON.stringify({ top: "/remote", status: "?? x.md\0" }));
   return ok(JSON.stringify({ entries: remoteFiles[args[1]] ?? [], truncated: false }));
 };
@@ -414,6 +416,16 @@ await remoteModel.reload();
 assert.deepEqual(remoteModel.rows().map((r) => r.abs), ["/remote/src", "/remote/x.md"]);
 assert.equal(markOf(remoteModel.marks, "/remote/x.md"), "A");
 assert.deepEqual(remoteCalls, [["app-list", "/remote"], ["app-git-status", "/remote"]]);
+// An open folder removed there meanwhile keeps its rows, as a local one does.
+remoteFiles["/remote/src"] = [entry("a.js")];
+await remoteModel.toggle("/remote/src");
+goneOnMachine = "/remote/src";
+await remoteModel.reload();
+assert.deepEqual(remoteModel.rows().map((r) => r.abs), ["/remote/src", "/remote/src/a.js", "/remote/x.md"]);
+goneOnMachine = "/remote";
+await assert.rejects(remoteModel.reload(), RemoteError, "a root it can't list is an error");
+goneOnMachine = null;
+await remoteModel.toggle("/remote/src");
 companion = { machine: "box", problem: "missing", install: "cargo install --locked --root ~/.local --git https://github.com/iurimadeira/herdr-nvim herdr-nvim", message: "herdr-nvim is not installed on box" };
 await assert.rejects(remoteModel.reload(), (e) => e instanceof RemoteError && e.companion.machine === "box");
 companion = null;

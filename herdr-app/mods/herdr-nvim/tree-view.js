@@ -40,6 +40,8 @@ function place(previous) {
   return { space: space?.id ?? null, tab: f?.tab ?? null, cwd, machine: space?.machine ?? null };
 }
 
+const filesShown = () => Boolean(panelState(layout())?.files);
+
 export class Tree {
   constructor(cx) {
     this.handle = cx.focus_handle();
@@ -148,7 +150,7 @@ export class Tree {
         await keepFresh({
           model: this.model,
           alive,
-          shown: () => Boolean(panelState(layout())?.files),
+          shown: filesShown,
           changes: () => changesIn(root),
           sleep: (ms) => cx.sleep(ms),
           redraw: () => cx.notify(),
@@ -445,7 +447,8 @@ export class Tree {
       delete: (row, _rows, cx) => this.action("delete", row, cx),
       yank: (row, _rows, cx) => this.action("yank", row, cx),
       paste: (row, _rows, cx) => this.action("paste", row, cx),
-      systemOpen: (row) => { if (row) systemOpen(row.abs); },
+      // A remote row's path is on its machine, not here.
+      systemOpen: (row) => { if (row && !this.model.source.remote) systemOpen(row.abs); },
       hidden: () => { this.model.showHidden = !this.model.showHidden; },
       ignored: () => { this.model.showIgnored = !this.model.showIgnored; },
       collapse: () => this.model.collapseAll(),
@@ -578,7 +581,7 @@ export class Tree {
 
   render(cx) {
     this.follow(cx);
-    if (this.stale) {
+    if (this.stale && filesShown()) {
       this.stale = false;
       const gen = this.rootGen;
       cx.spawn(async (cx) => {
@@ -600,7 +603,7 @@ export class Tree {
     // same nvim pane, so nvim reports its FocusGained (next to the current
     // file, which this tree watches): every such wake renders this again.
     // A remote machine that can't list shows why, not rows it may no longer have.
-    const t = theme(), rows = this.error ? [] : this.rows(), focusedNow = this.handle.is_focused();
+    const t = theme(), rows = this.error && this.model.source.remote ? [] : this.rows(), focusedNow = this.handle.is_focused();
     this.drawnFocused = focusedNow;
     if (this.revealing && !this.filter) {
       const at = rows.findIndex((r) => r.abs === this.revealing);

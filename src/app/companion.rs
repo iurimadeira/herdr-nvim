@@ -79,12 +79,18 @@ pub struct CompanionError {
 
 impl fmt::Display for CompanionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.found {
-            None => write!(f, "herdr-nvim is not installed on {}", self.machine)?,
-            Some(found) => write!(
+        let expected = &self.expected;
+        match (self.problem, &self.found) {
+            (Problem::Missing, _) => write!(f, "herdr-nvim is not installed on {}", self.machine)?,
+            (Problem::Mismatch, None) => write!(
+                f,
+                "herdr-nvim on {} is older than {} ({})",
+                self.machine, expected.version, expected.rev
+            )?,
+            (Problem::Mismatch, Some(found)) => write!(
                 f,
                 "herdr-nvim on {} is {} ({}), not {} ({})",
-                self.machine, found.version, found.rev, self.expected.version, self.expected.rev
+                self.machine, found.version, found.rev, expected.version, expected.rev
             )?,
         }
         write!(f, "; install it there: {}", install_command(&self.expected))
@@ -322,6 +328,16 @@ mod tests {
             )),
             (Problem::Mismatch, None)
         );
+        let old = classify("box", &this, &ran(2, "", "usage: herdr-nvim <toggle|...>"));
+        assert!(old
+            .unwrap_err()
+            .to_string()
+            .starts_with("herdr-nvim on box is older than 1.3.1"),);
+        let gone = classify("box", &this, &ran(1, "", spawn));
+        assert!(gone
+            .unwrap_err()
+            .to_string()
+            .starts_with("herdr-nvim is not installed on box; install it there: cargo install"),);
         let offline = classify("box", &this, &ran(1, "", "machine is unavailable")).unwrap_err();
         assert!(offline.downcast_ref::<CompanionError>().is_none());
         assert_eq!(offline.to_string(), "box: hc: machine is unavailable");

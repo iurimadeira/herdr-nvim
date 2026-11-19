@@ -59,7 +59,8 @@ export class TreeModel {
   }
 
   // A folder that can't be listed (gone meanwhile) keeps its rows; a remote
-  // machine that can't list is an error.
+  // root that can't be listed, or a machine without a matching herdr-nvim,
+  // is an error.
   async reload() {
     await this.loadAll([this.root, ...this.open]);
     await this.refreshMarks();
@@ -67,7 +68,7 @@ export class TreeModel {
 
   async loadAll(folders) {
     let failed = null;
-    await each(folders, (folder) => this.load(folder).catch((e) => { if (e instanceof RemoteError) failed ??= e; }));
+    await each(folders, (folder) => this.load(folder).catch((e) => { if (e instanceof RemoteError && (e.companion || same(folder, this.root))) failed ??= e; }));
     if (failed) throw failed;
   }
 

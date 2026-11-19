@@ -40,8 +40,13 @@ fn main() {
             {
                 println!("cargo:rerun-if-changed={path}");
             }
-            let changed = git(&["status", "--porcelain", "--untracked-files=no"])
-                .is_none_or(|status| !status.is_empty());
+            let changed = git(&[
+                "--no-optional-locks",
+                "status",
+                "--porcelain",
+                "--untracked-files=no",
+            ])
+            .is_none_or(|status| !status.is_empty());
             if changed {
                 let at = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
