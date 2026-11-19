@@ -1,38 +1,38 @@
 // The folder data behind the file tree: one folder's entries and the repo's
-// git marks. Paths are the mod's (path.js).
+// git marks, from herdr-nvim here or, for a remote tab, on its machine.
+// Paths are the mod's (path.js).
 
 import { exec } from "herdr";
-import { bin, canonical, child, dirname, key, machineOf } from "./path.js";
+import { bin, canonical, child, dirname, key, machineOfContext } from "./path.js";
 
-// One folder's entries as the tree shows them (`herdr-nvim app-list`,
-// src/app/list.rs): [{name, dir, hidden, ignored}], folders first, then by
-// name, at most 500.
-export async function listFolder(path) {
-  const r = await exec(bin(), ["app-list", path]);
-  if (r.code !== 0) throw new Error(r.stderr.trim().replace(/^herdr-nvim: /, "") || `Cannot list ${path}`);
-  return JSON.parse(r.stdout).entries;
-}
-
-// A folder's repo top (null outside one).
-const tops = new Map();
-// Only a repo found is kept: a folder may become one (`git init`).
-async function topOf(cwd) {
-  if (!tops.has(cwd)) {
-    const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd }).catch(() => null);
-    if (top?.code !== 0) return null;
-    tops.set(cwd, canonical(top.stdout.trim()));
+// Why a remote tab's tree can't show its machine's files: the herdr-nvim
+// there is missing or another build (`companion`, src/app/companion.rs), or
+// the machine didn't answer. Never shown as an empty folder.
+export class RemoteError extends Error {
+  constructor(message, machine, companion = null) {
+    super(message);
+    this.machine = machine;
+    this.companion = companion;
   }
-  return tops.get(cwd);
 }
 
-// Path key (path.js `key`) -> "M" | "A" | "D" | "U" for files git reports,
-// {} outside a repo.
-export async function gitMarks(cwd) {
-  const top = await topOf(cwd);
-  if (!top) return {};
-  // Writes nothing under .git, so the folder watch doesn't fire again.
-  const status = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=normal"], { cwd }).catch(() => null);
-  return status?.code === 0 ? marksFrom(top, status.stdout) : {};
+// `herdr-nvim <command> <path>`'s JSON answer: here, or with a remote tab's
+// `ctx` (`machine`) by the herdr-nvim on its machine. Every failure there is
+// a RemoteError.
+async function app(command, path, ctx = null, machine = null) {
+  const failed = (message, companion = null) => (machine ? new RemoteError(message, machine, companion) : new Error(message));
+  let r;
+  try {
+    r = await exec(bin(), [command, path, ...(ctx ? ["--ctx", JSON.stringify(ctx)] : [])]);
+  } catch (e) {
+    throw failed(`${bin()}: ${e?.message ?? e}`);
+  }
+  if (r.code === 0) {
+    try { return JSON.parse(r.stdout); } catch { throw failed(`${command} ${path}: not an answer: ${r.stdout.trim().slice(0, 200)}`); }
+  }
+  let companion = null;
+  try { companion = JSON.parse(r.stdout).companion ?? null; } catch {}
+  throw failed(companion?.message ?? (r.stderr.trim().replace(/^herdr-nvim: /, "") || `Cannot read ${path} (exit ${r.code})`), companion);
 }
 
 // The marks in `git status --porcelain=v1 -z` output, for the repo at `top`.
@@ -46,35 +46,29 @@ export function marksFrom(top, status) {
   return marks;
 }
 
-// Why a remote tab's tree can't show its machine's files (the herdr-nvim
-// there is missing or another build: `companion`, src/app/companion.rs, or
-// the machine didn't answer). Never shown as an empty folder.
-export class RemoteError extends Error {
-  constructor(message, companion = null) {
-    super(message);
-    this.companion = companion;
-  }
-}
-
-async function onMachine(command, path, ctx) {
-  const r = await exec(bin(), [command, path, "--ctx", JSON.stringify(ctx)]);
-  if (r.code === 0) return JSON.parse(r.stdout);
-  let companion = null;
-  try { companion = JSON.parse(r.stdout).companion ?? null; } catch {}
-  throw new RemoteError(companion?.message ?? (r.stderr.trim().replace(/^herdr-nvim: /, "") || `Cannot list ${path}`), companion);
-}
-
-// Where the tree reads a tab's folders and marks: here, or for a remote tab
-// (`ctx`: herdr-nvim's --ctx) the herdr-nvim on its machine, which lists
-// and reads git the same way.
+// What a tree offers for a tab (`ctx`: herdr-nvim's --ctx): where it reads
+// folders (`app-list`, src/app/list.rs: [{name, dir, hidden, ignored}],
+// folders first, then by name, at most 500) and git marks (`app-git-status`:
+// path key -> "M" | "A" | "D" | "U", {} outside a repo), and what else it can
+// do there (`can`: false, or why not). A remote tab's machine answers the
+// same commands; search, file operations and the system's app work only
+// here (#4).
 export function sourceFor(ctx) {
-  if (!machineOf(ctx?.tab)) return { remote: false, list: listFolder, marks: gitMarks };
+  const machine = machineOfContext(ctx);
+  const here = (op) => (machine ? `${op} work only on this machine's tabs for now.` : false);
   return {
-    remote: true,
-    list: async (folder) => (await onMachine("app-list", folder, ctx)).entries,
+    remote: Boolean(machine),
+    machine,
+    cannot: { find: here("Search"), fs: here("File operations"), systemOpen: here("The system's apps") },
+    list: async (folder) => {
+      const entries = (await app("app-list", folder, machine && ctx, machine))?.entries;
+      if (Array.isArray(entries)) return entries;
+      const message = `app-list ${folder}: no entries in the answer`;
+      throw machine ? new RemoteError(message, machine) : new Error(message);
+    },
     marks: async (root) => {
-      const { top, status } = await onMachine("app-git-status", root, ctx);
-      return top ? marksFrom(canonical(top), status) : {};
+      const status = machine ? await app("app-git-status", root, ctx, machine) : await app("app-git-status", root).catch(() => null);
+      return status?.top ? marksFrom(canonical(status.top), status.status) : {};
     },
   };
 }

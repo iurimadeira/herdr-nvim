@@ -49,6 +49,7 @@ case "$1" in
   exec)
     test "$2" = --on && test "$3" = box || exit 21
     test ! -f '{0}/offline' || {{ echo 'machine is unavailable' >&2; exit 1; }}
+    test ! -f '{0}/unknown-machine' || {{ printf '{{"error":{{"hint":"","kind":"unknown_machine","message":"no machine named box"}}}}\n' >&2; exit 4; }}
     case " $* " in
       *' -- herdr-nvim '*)
         while [ "$1" != herdr-nvim ]; do shift; done
@@ -601,12 +602,15 @@ esac
                 String::from_utf8_lossy(&remote.stderr)
             );
             assert_eq!(remote.stdout, local.stdout, "{mode}");
+            let calls = companion_calls(&f);
+            assert_eq!(calls.len(), 2, "{calls:?}");
+            assert_eq!(calls[0], "herdr-nvim app-version");
+            let (work, ctx) = calls[1].split_once(" --ctx ").expect("a forwarded --ctx");
+            assert_eq!(work, format!("herdr-nvim {mode} {dir}"));
             assert_eq!(
-                companion_calls(&f),
-                [
-                    "herdr-nvim app-version".to_owned(),
-                    format!("herdr-nvim {mode} {dir}"),
-                ]
+                serde_json::from_str::<Value>(ctx).unwrap(),
+                json!({"space":"s1","tab":"t1","terminal":"t7","cwd":"/remote"}),
+                "the companion gets its machine's own ids"
             );
         }
         let status: Value =
@@ -655,6 +659,34 @@ esac
         out["companion"].clone()
     }
 
+    /// This binary is a committed build or one with local changes: a
+    /// committed one gives the command that installs it, the other says why
+    /// none would match.
+    fn assert_install_or_why(error: &Value) {
+        let remedy = error["remedy"].as_str().unwrap();
+        match error["install"].as_str() {
+            Some(install) => {
+                assert!(install
+                    .starts_with("cargo install --locked --root ~/.local --git https://github.com/iurimadeira/herdr-nvim --rev "));
+                assert!(remedy.contains(install));
+            }
+            None => assert!(remedy.contains("no companion matches"), "{remedy}"),
+        }
+    }
+
+    #[test]
+    fn an_hc_failure_is_shown_by_its_message_not_as_a_companion_problem() {
+        let f = Fixture::new("remote-companion-hc-error", false, false);
+        fs::write(f.sandbox.dir.join("unknown-machine"), "").unwrap();
+        let result = f.run("app-list", f.ctx(), &["/remote"]);
+        assert_eq!(result.status.code(), Some(1));
+        assert!(result.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8_lossy(&result.stderr).trim(),
+            "herdr-nvim: box: no machine named box"
+        );
+    }
+
     #[test]
     fn a_companion_of_another_build_is_refused_before_any_work() {
         let f = Fixture::new("remote-companion-mismatch", false, false);
@@ -668,10 +700,11 @@ esac
         assert_eq!(error["problem"], "mismatch");
         assert_eq!(error["found"]["version"], "0.9.0");
         assert_eq!(error["expected"]["version"], env!("CARGO_PKG_VERSION"));
-        assert!(error["install"]
+        assert_install_or_why(&error);
+        assert!(error["title"]
             .as_str()
             .unwrap()
-            .starts_with("cargo install"));
+            .starts_with("herdr-nvim on box is 0.9.0"));
         assert_eq!(companion_calls(&f), ["herdr-nvim app-version"]);
     }
 
@@ -684,10 +717,8 @@ esac
         assert_eq!(error["machine"], "box");
         assert_eq!(error["problem"], "missing");
         assert!(error["found"].is_null());
-        assert!(error["install"]
-            .as_str()
-            .unwrap()
-            .contains("--git https://github.com/iurimadeira/herdr-nvim"));
+        assert_install_or_why(&error);
+        assert_eq!(error["title"], "herdr-nvim is not installed on box");
         assert!(String::from_utf8_lossy(&result.stderr).contains("box"));
         assert_eq!(companion_calls(&f), ["herdr-nvim app-version"]);
     }

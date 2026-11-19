@@ -203,11 +203,24 @@ The tree's keys (LazyVim's Snacks explorer defaults; `?` lists them):
     <text>` (one diagram, drawn by merman with the system fonts it measures
     with, as a PNG at 2x on a transparent background, written beside as a
     dot-file and renamed);
+  - `app-list <folder>` (a folder's entries for the tree: name, folder,
+    hidden, ignored by git), `app-git-status <folder>` (`{top, status}`: the
+    repo's `git status --porcelain -z`, `top` null outside a repo),
+    `app-find`, and `app-version` (`{version, rev}`, the companion handshake);
   - each takes `--ctx` (the focused space, tab, terminal), exits 3 with
-    `{"nvim_missing": …}` when there's no usable Neovim, and ends within 30 s.
+    `{"nvim_missing": …}` when there's no usable Neovim, and ends within 30 s;
+  - with a remote tab's `--ctx`, `app-list` and `app-git-status` run on its
+    machine (the tab's, else the space's) by the herdr-nvim there, after an
+    `app-version` handshake, with the ids made bare; a missing or other build
+    there exits 4 with `{"companion": {machine, problem, found, expected,
+    install, title, remedy, message}}` (`install` null when this build can't
+    match any companion), and any other failure exits 1 with the reason.
 - **Mod `herdr-nvim`** (`place: none`, focusable), by where it is shown:
   - the layout's `files` slot: the tree (`tree-view.js`; listing by `herdr-nvim app-list`,
-    marks from `git status --porcelain -z`, `watchFolder`);
+    marks by `app-git-status`; a local root refreshes on `watchFolder`, a
+    remote one polls both every 2 s while the tree shows, never while
+    hidden; search, file operations and the system's app are local-only, and
+    say so on a remote tab);
   - a floating 0×0 block (`role: "sync"`), always rendered: the controller
     (`sync.js`) that keeps the panel and each tab's nvim pane together, and
     takes the commands `herdr-nvim.pick`, `.reveal`, `.toggle`,
@@ -298,8 +311,11 @@ copy of it, else clones it once (`<name>-copy`), and switches to it.
   the keyboard again for 2 s after each arrival (herdrdev/herdr-app#362,
   fixed upstream, not released yet).
 - Remote POSIX hosts need Neovim 0.10+ and hc. `cmd-e` and `open --tab
-  <machine/tab>` use their own Neovim config/explorer; the native tree,
-  picker, annotations and rendered previews remain local-only.
+  <machine/tab>` use their own Neovim config/explorer. The native tree lists
+  a remote tab's files through the companion (above), rooted by the local
+  rule, revealing nvim's file when it gets the keyboard but not following it;
+  its search and file operations, the picker, annotations and rendered
+  previews remain local-only.
 
 ## Done when
 

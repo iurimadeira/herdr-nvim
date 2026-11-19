@@ -1,16 +1,20 @@
-// Keeps a tree's listing current. A local root lists again what its folder
-// watch reports; a remote one has no watch, so it lists everything again
-// every POLL_MS while the tree shows, and asks its machine nothing while
-// hidden. Either way a hidden tree catches up once when shown (`hidden`).
+// Keeps a tree's listing current while the tree shows. A local root lists
+// again what its folder watch reports; a remote one has no watch, so it
+// lists everything again every POLL_MS. A tree left hidden lists nothing for
+// changes (`hidden`) and catches up once when shown, a local one in the
+// view's render. A remote one asks its machine nothing while hidden, not
+// even when set, and catches up on its next poll, which the view wakes early
+// by ending `sleep`.
 
 import { GIT_EVERY_MS } from "./tree-model.js";
+import { RemoteError } from "./tree.js";
 
 export const POLL_MS = 2000;
 
 // `model`: a TreeModel at its root. `changes()`: the local folder watch's next
 // batch. `failed(error | null)` and `notify` run only when the error changes,
-// so a remote machine without herdr-nvim toasts once, not every poll, and the
-// tree comes back once it is installed.
+// so a machine that can't list toasts once, not every poll, and the tree comes
+// back once it can.
 export async function keepFresh({ model, alive, shown, changes, sleep, redraw, hidden, failed, notify }) {
   let last = null, marksDue = false;
   const attempt = async (work) => {
@@ -21,11 +25,12 @@ export async function keepFresh({ model, alive, shown, changes, sleep, redraw, h
     if (message !== last) {
       last = message;
       failed(error);
-      if (error?.companion) notify(companionToast(error.companion));
+      if (error instanceof RemoteError) notify(remoteToast(error));
     }
     return result;
   };
-  await attempt(() => model.reload());
+  if (shown() || !model.source.remote) await attempt(() => model.reload());
+  else hidden();
   redraw();
   while (alive()) {
     const changed = model.source.remote ? await sleep(POLL_MS).then(() => null) : await changes();
@@ -49,9 +54,11 @@ export async function keepFresh({ model, alive, shown, changes, sleep, redraw, h
   }
 }
 
-// The toast for a remote machine's herdr-nvim (src/app/companion.rs): the
-// machine, and the command that installs this build there.
-export function companionToast({ machine, problem, install }) {
-  const title = problem === "missing" ? `herdr-nvim is not installed on ${machine}` : `herdr-nvim on ${machine} is another build`;
-  return { title, body: `Install this build there:\n${install}`, level: "error" };
+// Why a remote tree shows no files: the machine's herdr-nvim and how to fix
+// it, in herdr-nvim's own words (src/app/companion.rs), else the machine's
+// answer.
+export function remoteToast(error) {
+  const c = error.companion;
+  if (c) return { title: c.title, body: c.remedy, level: "error" };
+  return { title: `Cannot list files on ${error.machine}`, body: error.message, level: "error" };
 }

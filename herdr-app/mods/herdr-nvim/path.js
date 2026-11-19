@@ -84,6 +84,10 @@ export function machineOf(id) {
 
 export const isRemote = (id) => machineOf(id) !== null;
 
+// A tab context's machine ({space, tab}, herdr-nvim's --ctx): its tab's, else
+// its space's (src/app/remote.rs `machine_of`); null when local.
+export const machineOfContext = (ctx) => machineOf(ctx?.tab) ?? machineOf(ctx?.space);
+
 // `id` (as a machine's own core names it) as the app names it.
 export const qualify = (machine, id) => (machine ? `${machine}/${id}` : id);
 

@@ -130,12 +130,17 @@ If it then has no socket (it lost it, or never made one), `open` refuses and
 `app-remote-stop --force` ends it anyway: unsaved edits survive only in its
 swap files, and are lost if it runs with `noswapfile`.
 
-The native Files tree lists a remote tab's space folder through the
-herdr-nvim installed on that machine (the companion), with the same entries,
-order, hidden and ignored rules and git marks as a local tree. It refreshes
-every 2 seconds while the tree is shown, and asks the machine nothing while
-it is hidden. Install the companion on each remote machine, built from the
-same commit as the desktop's herdr-nvim, where its core's PATH finds it:
+The native Files tree lists a remote tab's files through the herdr-nvim
+installed on that machine (the companion), with the same entries, order,
+hidden and ignored rules and git marks as a local tree. Its root follows the
+local rule: the folder of the tab's Neovim when it runs there, else the
+focused pane's folder, else the space's folder. When the tree gets the
+keyboard it moves to that Neovim's folder and reveals its file; unlike a local
+tree, it does not follow the file as Neovim changes it. It refreshes every 2
+seconds while the tree is shown and asks the machine nothing while it is
+hidden, then catches up when shown. Install the companion on each remote
+machine, built from the same commit as the desktop's herdr-nvim, where its
+core's PATH finds it:
 
 ```sh
 cargo install --locked --root ~/.local \
@@ -144,14 +149,18 @@ cargo install --locked --root ~/.local \
 
 The tree checks the companion's version and commit before each request; a
 missing or different companion shows an error and a toast with the exact
-command for that machine. A desktop build with uncommitted changes matches
-only itself, so remote trees need a committed build. Tree search, file
-operations, the agent-file picker, annotations and rendered previews remain
+command for that machine, and a machine that does not answer shows its error
+and a toast too, once per new error. A desktop build with uncommitted changes
+or not built from a commit matches no companion, so the toast offers no
+command; remote trees need a build from a commit. On a remote tab, tree search
+(`/`), file operations and opening in the system's app show a message instead;
+they, the agent-file picker, annotations and rendered previews remain
 local-only.
 
 ## The tree
 
-The tree is rooted at the tab's repo and follows nvim's file. Opening a file
+The tree is rooted at the tab's repo and follows nvim's file (on a remote
+tab, it reveals the file when it gets the keyboard). Opening a file
 from it shows it in the tab's nvim, which takes the keyboard. It has
 LazyVim's Snacks explorer keys (`/` find, `a` new, `r` rename, `d` delete,
 Tab to select several, …), and `?` lists them all.

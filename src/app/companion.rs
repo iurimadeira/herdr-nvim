@@ -54,12 +54,14 @@ pub fn matches(this: &Identity, found: &Identity) -> bool {
 }
 
 /// Pure: the command that installs this build on a machine, where its core's
-/// PATH finds it (`~/.local/bin`).
-pub fn install_command(this: &Identity) -> String {
-    let pin = this
-        .commit()
-        .map_or_else(String::new, |commit| format!(" --rev {commit}"));
-    format!("cargo install --locked --root ~/.local --git {REPO}{pin} herdr-nvim")
+/// PATH finds it (`~/.local/bin`); none for a build no companion can match
+/// (local changes, or built outside git).
+pub fn install_command(this: &Identity) -> Option<String> {
+    this.commit()
+        .filter(|commit| *commit == this.rev)
+        .map(|commit| {
+            format!("cargo install --locked --root ~/.local --git {REPO} --rev {commit} herdr-nvim")
+        })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -77,30 +79,36 @@ pub struct CompanionError {
     pub expected: Identity,
 }
 
-impl fmt::Display for CompanionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let expected = &self.expected;
-        match (self.problem, &self.found) {
-            (Problem::Missing, _) => write!(f, "herdr-nvim is not installed on {}", self.machine)?,
-            (Problem::Mismatch, None) => write!(
-                f,
-                "herdr-nvim on {} is older than {} ({})",
-                self.machine, expected.version, expected.rev
-            )?,
-            (Problem::Mismatch, Some(found)) => write!(
-                f,
-                "herdr-nvim on {} is {} ({}), not {} ({})",
-                self.machine, found.version, found.rev, expected.version, expected.rev
-            )?,
-        }
-        write!(f, "; install it there: {}", install_command(&self.expected))
-    }
-}
-
-impl std::error::Error for CompanionError {}
-
 impl CompanionError {
-    /// What the app's tree shows and toasts.
+    /// What is wrong on the machine: the toast's title.
+    pub fn title(&self) -> String {
+        let (machine, expected) = (&self.machine, &self.expected);
+        match (self.problem, &self.found) {
+            (Problem::Missing, _) => format!("herdr-nvim is not installed on {machine}"),
+            (Problem::Mismatch, None) => format!(
+                "herdr-nvim on {machine} is older than {} ({})",
+                expected.version, expected.rev
+            ),
+            (Problem::Mismatch, Some(found)) => format!(
+                "herdr-nvim on {machine} is {} ({}), not {} ({})",
+                found.version, found.rev, expected.version, expected.rev
+            ),
+        }
+    }
+
+    /// What fixes it: the install command, or why no companion can match
+    /// this build.
+    pub fn remedy(&self) -> String {
+        match install_command(&self.expected) {
+            Some(install) => format!("install it there: {install}"),
+            None if self.expected.commit().is_some() => {
+                "this desktop build has uncommitted changes, so no companion matches it; use a build from a commit".to_owned()
+            }
+            None => "this desktop build is not from a git commit, so no companion matches it; use a build from a commit".to_owned(),
+        }
+    }
+
+    /// What the app's tree shows (`message`) and toasts (`title`, `remedy`).
     pub fn to_json(&self) -> Value {
         json!({
             "machine": self.machine,
@@ -108,16 +116,47 @@ impl CompanionError {
             "found": self.found,
             "expected": self.expected,
             "install": install_command(&self.expected),
+            "title": self.title(),
+            "remedy": self.remedy(),
             "message": self.to_string(),
         })
     }
 }
+
+impl fmt::Display for CompanionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}; {}", self.title(), self.remedy())
+    }
+}
+
+impl std::error::Error for CompanionError {}
 
 /// What one `hc exec` gave.
 pub struct Ran {
     pub code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+}
+
+/// Pure: why a run failed: hc's own error message (`{"error": {message}}`
+/// on stderr), else what the program wrote to stderr, else its exit code.
+pub fn failure(ran: &Ran) -> String {
+    let stderr = ran.stderr.trim();
+    serde_json::from_str::<Value>(stderr)
+        .ok()
+        .and_then(|v| v.pointer("/error/message")?.as_str().map(str::to_owned))
+        .or_else(|| {
+            (!stderr.is_empty()).then(|| {
+                stderr
+                    .strip_prefix("herdr-nvim: ")
+                    .unwrap_or(stderr)
+                    .to_owned()
+            })
+        })
+        .unwrap_or_else(|| match ran.code {
+            Some(code) => format!("exit {code}"),
+            None => "killed by a signal".to_owned(),
+        })
 }
 
 /// Pure: the handshake's answer. A companion that ran but gave no identity
@@ -146,19 +185,25 @@ pub fn classify(machine: &str, this: &Identity, ran: &Ran) -> Result<()> {
     if ran.stderr.starts_with("usage: herdr-nvim") {
         return Err(error(Problem::Mismatch, None).into());
     }
-    bail!("{machine}: hc: {}", ran.stderr.trim())
+    bail!("{machine}: {}", failure(ran))
 }
 
-/// Pure: `ctx`'s machine, once every id in it is that machine's.
-fn machine_of(ctx: &cli::AppCtx) -> Result<&str> {
+/// Pure: `ctx`'s machine, and `ctx` as that machine's herdr-nvim names it
+/// (its bare ids); an id of another machine, or a local one, is refused.
+fn on_machine(ctx: &cli::AppCtx) -> Result<(&str, Value)> {
     let machine = remote::machine_of(ctx).context("not a remote tab")?;
-    for id in [Some(&ctx.space), Some(&ctx.tab), ctx.terminal.as_ref()]
-        .into_iter()
-        .flatten()
-    {
-        remote::raw(machine, id)?;
-    }
-    Ok(machine)
+    let terminal = ctx
+        .terminal
+        .as_deref()
+        .map(|id| remote::raw(machine, id))
+        .transpose()?;
+    let bare = json!({
+        "space": remote::raw(machine, &ctx.space)?,
+        "tab": remote::raw(machine, &ctx.tab)?,
+        "terminal": terminal,
+        "cwd": ctx.cwd,
+    });
+    Ok((machine, bare))
 }
 
 /// Pure: the hc argv that runs `herdr-nvim <args>` on `machine`.
@@ -185,10 +230,9 @@ fn exec(machine: &str, secs: u32, args: &[String]) -> Result<Ran> {
     })
 }
 
-/// Runs `herdr-nvim <args>` on `ctx`'s machine, after the handshake, and
-/// returns what it printed.
-pub fn delegate(ctx: &cli::AppCtx, args: &[String]) -> Result<String> {
-    let machine = machine_of(ctx)?;
+/// Runs `herdr-nvim <args>` on `machine`, after the handshake, and returns
+/// what it printed.
+fn delegate(machine: &str, args: &[String]) -> Result<String> {
     classify(
         machine,
         &Identity::this_build(),
@@ -196,25 +240,21 @@ pub fn delegate(ctx: &cli::AppCtx, args: &[String]) -> Result<String> {
     )?;
     let ran = exec(machine, WORK_SECS, args)?;
     if ran.code != Some(0) {
-        let reason = ran.stderr.trim();
-        bail!(
-            "{machine}: {}",
-            reason.strip_prefix("herdr-nvim: ").unwrap_or(reason)
-        );
+        bail!("{machine}: {}", failure(&ran));
     }
     Ok(ran.stdout)
 }
 
-/// Pure: `mode` and its `args` as the companion gets them, without `--ctx`
-/// (its ids are this machine's view of the tab).
-fn delegated(mode: &str, args: &[String]) -> Vec<String> {
+/// Pure: `mode` and its `args` as the companion gets them, `--ctx` being
+/// `bare` (the tab as its machine names it).
+fn delegated(mode: &str, args: &[String], bare: &Value) -> Vec<String> {
     let mut out = vec![mode.to_owned()];
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
+        out.push(arg.clone());
         if arg == "--ctx" {
             rest.next();
-        } else {
-            out.push(arg.clone());
+            out.push(bare.to_string());
         }
     }
     out
@@ -224,7 +264,10 @@ fn delegated(mode: &str, args: &[String]) -> Vec<String> {
 /// `--ctx`, else `here`'s.
 pub fn serve(mode: &str, args: &[String], here: impl FnOnce() -> Result<String>) -> Result<()> {
     let out = match cli::ctx_from_args(args)? {
-        Some(ctx) if remote::is_remote(&ctx) => delegate(&ctx, &delegated(mode, args))?,
+        Some(ctx) if remote::is_remote(&ctx) => {
+            let (machine, bare) = on_machine(&ctx)?;
+            delegate(machine, &delegated(mode, args, &bare))?
+        }
         _ => here()?,
     };
     print!("{out}");
@@ -281,15 +324,61 @@ mod tests {
     }
 
     #[test]
-    fn the_install_command_pins_this_builds_commit() {
+    fn only_a_build_a_companion_can_match_offers_an_install_command() {
         assert_eq!(
-            install_command(&id("1.3.1", COMMIT)),
+            install_command(&id("1.3.1", COMMIT)).unwrap(),
             format!(
                 "cargo install --locked --root ~/.local --git {REPO} --rev {COMMIT} herdr-nvim"
             )
         );
-        assert!(install_command(&id("1.3.1", &format!("{COMMIT}-dirty-1"))).contains(COMMIT));
-        assert!(!install_command(&id("1.3.1", "unknown")).contains("--rev"));
+        assert_eq!(
+            install_command(&id("1.3.1", &format!("{COMMIT}-dirty-1"))),
+            None
+        );
+        assert_eq!(install_command(&id("1.3.1", "unknown")), None);
+        let error = |rev: &str| CompanionError {
+            machine: "box".into(),
+            problem: Problem::Missing,
+            found: None,
+            expected: id("1.3.1", rev),
+        };
+        let dirty = error(&format!("{COMMIT}-dirty-1"));
+        assert_eq!(dirty.title(), "herdr-nvim is not installed on box");
+        assert!(dirty.remedy().contains("uncommitted changes"));
+        assert!(!dirty.to_string().contains("cargo install"));
+        assert_eq!(dirty.to_json()["install"], Value::Null);
+        let unknown = error("unknown");
+        assert!(unknown.remedy().contains("not from a git commit"));
+        assert_eq!(unknown.to_json()["install"], Value::Null);
+        let clean = error(COMMIT).to_json();
+        assert_eq!(clean["title"], "herdr-nvim is not installed on box");
+        assert_eq!(
+            clean["message"],
+            format!(
+                "herdr-nvim is not installed on box; install it there: {}",
+                clean["install"].as_str().unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn a_failed_run_says_why_by_hcs_message_else_stderr_else_its_exit() {
+        let unknown_machine = r#"{"error":{"hint":"see hc machines","kind":"unknown_machine","message":"no machine named box"}}"#;
+        assert_eq!(
+            failure(&ran(4, "", unknown_machine)),
+            "no machine named box"
+        );
+        assert_eq!(
+            failure(&ran(1, "", "herdr-nvim: not a folder: /x\n")),
+            "not a folder: /x"
+        );
+        assert_eq!(failure(&ran(255, "", "  ")), "exit 255");
+        let killed = Ran {
+            code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        assert_eq!(failure(&killed), "killed by a signal");
     }
 
     #[test]
@@ -340,7 +429,15 @@ mod tests {
             .starts_with("herdr-nvim is not installed on box; install it there: cargo install"),);
         let offline = classify("box", &this, &ran(1, "", "machine is unavailable")).unwrap_err();
         assert!(offline.downcast_ref::<CompanionError>().is_none());
-        assert_eq!(offline.to_string(), "box: hc: machine is unavailable");
+        assert_eq!(offline.to_string(), "box: machine is unavailable");
+        let unknown =
+            r#"{"error":{"hint":"","kind":"unknown_machine","message":"no machine named box"}}"#;
+        assert_eq!(
+            classify("box", &this, &ran(4, "", unknown))
+                .unwrap_err()
+                .to_string(),
+            "box: no machine named box"
+        );
     }
 
     #[test]
@@ -349,21 +446,32 @@ mod tests {
             space: space.into(),
             tab: tab.into(),
             terminal: terminal.map(str::to_owned),
-            cwd: None,
+            cwd: Some("/x".into()),
         };
+        let remote = ctx("box/s1", "box/t1", Some("box/t7"));
+        let (machine, bare) = on_machine(&remote).unwrap();
+        assert_eq!(machine, "box");
         assert_eq!(
-            machine_of(&ctx("box/s1", "box/t1", Some("box/t7"))).unwrap(),
-            "box"
+            bare,
+            json!({"space": "s1", "tab": "t1", "terminal": "t7", "cwd": "/x"})
         );
-        assert!(machine_of(&ctx("other/s1", "box/t1", None)).is_err());
-        assert!(machine_of(&ctx("box/s1", "box/t1", Some("t7"))).is_err());
-        assert!(machine_of(&ctx("s1", "t1", None)).is_err());
+        assert!(on_machine(&ctx("other/s1", "box/t1", None)).is_err());
+        assert!(on_machine(&ctx("box/s1", "box/t1", Some("t7"))).is_err());
+        assert!(on_machine(&ctx("box/s1", "t1", None)).is_err());
+        assert!(on_machine(&ctx("s1", "t1", None)).is_err());
         let args: Vec<String> = ["/x", "--ctx", "{}", "--limit", "9"]
             .map(String::from)
             .into();
         assert_eq!(
-            delegated("app-list", &args),
-            ["app-list", "/x", "--limit", "9"]
+            delegated("app-list", &args, &json!({"space": "s1", "tab": "t1"})),
+            [
+                "app-list",
+                "/x",
+                "--ctx",
+                r#"{"space":"s1","tab":"t1"}"#,
+                "--limit",
+                "9"
+            ]
         );
         assert_eq!(
             exec_argv("box", 8, &["app-list".into(), "/x".into()]),
