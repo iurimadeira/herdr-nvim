@@ -5,7 +5,7 @@
 
 import { exec, focused, notify, readTextFile, setShared, shared } from "herdr";
 import { nvim } from "./lib.js";
-import { bin, canonical, join, namesFolder } from "./path.js";
+import { bin, canonical, join, namesFolder, zedTarget } from "./path.js";
 
 // The tab the tree works for: what `--ctx` takes. No folder: herdr-nvim
 // finds where the tab works from its terminals (where its nvim starts). The
@@ -96,7 +96,7 @@ export async function treeMode() {
 const ZED = "/usr/local/bin/zed";
 
 export async function systemOpen(path, machine = null) {
-  const target = machine ? `ssh://${machine}${path}` : path;
+  const target = zedTarget(path, machine);
   const r = await exec(ZED, [target]).catch((e) => ({ code: -1, stderr: String(e) }));
   if (r.code !== 0) notify({ title: "Cannot open in Zed", body: r.stderr || target, level: "error" });
 }

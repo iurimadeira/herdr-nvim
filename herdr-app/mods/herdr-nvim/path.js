@@ -91,6 +91,10 @@ export const machineOfContext = (ctx) => machineOf(ctx?.tab) ?? machineOf(ctx?.s
 // `id` (as a machine's own core names it) as the app names it.
 export const qualify = (machine, id) => (machine ? `${machine}/${id}` : id);
 
+// What Zed's CLI opens for the absolute path `abs`: the path, or on a remote
+// tab's `machine` an ssh:// URL (the machine's name is the ssh host).
+export const zedTarget = (abs, machine) => (machine ? `ssh://${machine}${abs}` : abs);
+
 // The entry `name` (or names a listing or git gave, "/" between them) in the
 // folder `dir`.
 export function child(dir, name) {

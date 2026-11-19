@@ -278,9 +278,9 @@ app.platform = "windows";
 app.home = "C:\\Users\\Me\\.config\\herdr-app";
 assert.equal(path.bin(), "C:\\Users\\Me\\.config\\herdr-app\\mods\\herdr-nvim\\bin\\herdr-nvim.exe");
 
-// The mods start no program but herdr-nvim and Zed (no git,
-// which herdr-nvim runs; no sh, cat, cp or PowerShell: they differ by OS, or
-// Windows lacks them).
+// The mods start no program but herdr-nvim and Zed's CLI (no git, which
+// herdr-nvim runs; no sh, cat, cp or PowerShell). Zed's CLI is the one
+// program at a fixed Mac path: `o` needs it there and toasts without it.
 const started = new Set();
 for (const mod of ["herdr-nvim", "herdr-nvim-header"]) {
   for (const file of readdirSync(new URL(`${mod}/`, modsDir)).filter((f) => f.endsWith(".js"))) {
@@ -289,6 +289,11 @@ for (const mod of ["herdr-nvim", "herdr-nvim-header"]) {
   }
 }
 assert.deepEqual([...started].sort(), ["ZED", "bin()"]);
+// What Zed opens for a row: a local path as is, a remote tab's as an
+// ssh:// URL to its machine (the path's own / joins them).
+assert.equal(path.zedTarget("/r/a b.txt", null), "/r/a b.txt");
+assert.equal(path.zedTarget("/home/me/proj/x.js", "lab"), "ssh://lab/home/me/proj/x.js");
+assert.equal(path.zedTarget("/", "lab"), "ssh://lab/");
 // `o` opens the row in Zed on this Mac: a local path as is, a remote tab's
 // over Zed's SSH remoting; a failure toasts.
 const { systemOpen } = await import("../mods/herdr-nvim/ops.js");

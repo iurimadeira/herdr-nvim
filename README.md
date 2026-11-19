@@ -48,7 +48,11 @@ the real app (0.1.16) on a hosted Windows runner by the hand-run
 `windows-real-app` workflow; what only a person can check is in
 `herdr-app/e2e/WINDOWS-CHECKLIST.md`.
 
-The herdr TUI plugin works on all three; see [TUI.md › Install](TUI.md#install).
+The tree's `o` opens in Zed and needs macOS with Zed's CLI at
+`/usr/local/bin/zed` (Zed's "Install CLI"); on Linux, on Windows, or with the
+CLI elsewhere it shows a "Cannot open in Zed" toast.
+
+The herdr TUI plugin works on macOS, Linux and Windows; see [TUI.md › Install](TUI.md#install).
 
 ## Install
 
@@ -158,7 +162,10 @@ or not built from a commit matches no companion, so the toast offers no
 command; remote trees need a build from a commit. On a remote tab, tree search
 (`/`) and file operations show a message instead; they, the agent-file picker,
 annotations and rendered previews remain local-only. `o` opens the row in Zed
-on the Mac, a remote tab's over SSH (`ssh://<machine>/<path>`).
+on the Mac, a remote tab's over SSH (`ssh://<machine><path>`, `<path>`
+absolute). The machine's Herdr name is the ssh host, so it must be one the
+Mac reaches by that name, such as a `Host` in `~/.ssh/config`; a machine added
+as `user@ip:port`, renamed, or added with `--via` does not open.
 
 ## The tree
 

@@ -122,7 +122,7 @@ The tree's keys (LazyVim's Snacks explorer defaults; `?` lists them):
 | `c` | copy the selected rows into the row's folder (confirm); with none, copy to a new name |
 | `d` | delete (confirm); to the trash when the person's Snacks says so; their buffers close |
 | `y` / `p` | yank the paths into nvim's register / paste those files into the row's folder |
-| `o` | open in Zed on the Mac (a remote tab's over SSH) |
+| `o` | open in Zed (macOS, Zed's CLI at `/usr/local/bin/zed`; a remote tab's over SSH) |
 | `H` | show hidden files (starts as the person's Snacks explorer has it) |
 | `I` | show git-ignored files (starts as the person's Snacks explorer has it) |
 | `Z` | close every folder |
