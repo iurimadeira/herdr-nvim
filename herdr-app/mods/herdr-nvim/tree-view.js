@@ -60,13 +60,14 @@ export class Tree {
       for (;;) {
         const command = await nextCommand();
         if (command === "focus") {
-          // The selection stays where the person left it: nvim's file changes
-          // already move it (watchCurrent), and cmd-shift-e / <leader>E reveal
-          // on purpose (shared "herdr-nvim.reveal"). Only the first arrival
-          // on a tab, before the tree knows nvim's file, picks it (else the
-          // first row). A remote tab's nvim is not watched: every arrival
-          // picks its file and folder.
-          const keep = this.overlayOpen || this.pressing || (!this.place?.machine && this.current != null);
+          // On a local tab the selection stays where the person left it:
+          // nvim's file changes already move it (watchCurrent), and
+          // cmd-shift-e / <leader>E reveal on purpose (shared
+          // "herdr-nvim.reveal"). Only the first arrival since the tree moved
+          // to the tab picks nvim's file (else the first row). A remote tab's
+          // nvim is not watched: every arrival picks its file and folder.
+          const keep = this.overlayOpen || this.pressing || (!this.place?.machine && this.rootTab != null && this.arrivedTab === this.rootTab);
+          this.arrivedTab = this.rootTab;
           this.overlayOpen = this.pressing = false;
           this.handover.arrive(cx);
           cx.notify();
@@ -97,6 +98,7 @@ export class Tree {
     this.watching = null;
     this.rootTab = next.tab;
     this.current = null;
+    this.arrivedTab = null;
     this.asking = null;
     if (!next.cwd) {
       this.tabRoot = null;

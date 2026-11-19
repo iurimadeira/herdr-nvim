@@ -576,6 +576,42 @@ await loop;
 // hidden), its file revealed whenever the tree gets the keyboard; it never
 // follows nvim's file meanwhile, and every listing goes to the machine with
 // the tab's bare context.
+// First a local tab: its selection stays across keyboard arrivals, even
+// with no file of nvim's in the root; a tab moved to reveals on its first.
+const treeCx = { focus_handle: () => ({ is_focused: () => false, focus() {} }), spawn: (fn) => { fn(treeCx); }, notify() {}, sleep: (ms) => new Promise((done) => setTimeout(done, ms).unref()) };
+const nvimHere = { "l1": { file: null, watch: null, tab_root: "/r" }, "l2": { file: "/r/b.js", watch: null, tab_root: "/r" } };
+app.spaces = [{ id: "s", folder: "/r", active: true }];
+app.focused = { space: "s", tab: "l1", pane: "p1", terminal: "t1" };
+app.panes = [{ pane: "p1", terminal: "t1", tab: "l1", cwd: "/r" }, { pane: "p2", terminal: "t2", tab: "l2", cwd: "/r" }];
+app.layout = stack("files");
+app.exec = async (_cmd, args) => {
+  if (args[0] === "app-current") return ok(JSON.stringify(nvimHere[JSON.parse(args.at(-1)).tab]));
+  if (args[0] === "app-list") return ok(JSON.stringify({ entries: [entry("a.js"), entry("b.js"), entry("c.js")], truncated: false }));
+  if (args[0] === "app-git-status") return ok(JSON.stringify({ top: null, status: "" }));
+  return ok("{}");
+};
+const tree = new Tree(treeCx);
+tree.follow(treeCx);
+await settle();
+assert.equal(tree.model.root, "/r");
+command("focus");
+await settle();
+assert.equal(tree.selected, 0, "the first arrival, with no file of nvim's: the first row");
+tree.selected = 2;
+command("focus");
+await settle();
+command("focus");
+await settle();
+assert.equal(tree.selected, 2, "a later arrival on a local tab moved the person's selection");
+app.focused = { space: "s", tab: "l2", pane: "p2", terminal: "t2" };
+tree.follow(treeCx);
+await settle();
+tree.selected = 0;
+command("focus");
+await settle();
+assert.equal(tree.current, "/r/b.js", "the first arrival on the tab moved to reveals nvim's file");
+assert.equal(tree.revealing, "/r/b.js", "render selects it");
+
 app.spaces = [{ id: "box/s1", machine: "box", folder: "/remote", active: true }];
 app.focused = { space: "box/s1", tab: "box/t1", pane: "box/p1", terminal: "box/t7" };
 app.panes = [{ pane: "box/p1", terminal: "box/t7", tab: "box/t1", cwd: "/remote/work" }];
@@ -597,10 +633,7 @@ app.exec = async (cmd, args) => {
   if (args[0] === "app-find") assert.fail("a remote tree never searches this machine");
   return ok(JSON.stringify({ entries: there[args[1]] ?? [], truncated: false }));
 };
-const treeCx = { focus_handle: () => ({ is_focused: () => false, focus() {} }), spawn: (fn) => { fn(treeCx); }, notify() {}, sleep: (ms) => new Promise((done) => setTimeout(done, ms).unref()) };
-const tree = new Tree(treeCx);
-// A local tab's reveal first: the remote tab's arrivals must not keep it.
-tree.current = "/r/local.js";
+// The local tab's arrivals and reveal must not keep the remote tab's.
 tree.follow(treeCx);
 await settle();
 assert.deepEqual(asked, [], "nothing asked of the machine while Files is hidden");
