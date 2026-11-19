@@ -3,9 +3,9 @@
 // place that knows the request shapes (lua/herdr-nvim/fs.lua, `request`) and
 // where a path may go.
 
-import { exec, focused, notify, readTextFile, setShared, shared, window } from "herdr";
+import { exec, focused, notify, readTextFile, setShared, shared } from "herdr";
 import { nvim } from "./lib.js";
-import { bin, canonical, join, namesFolder, native, windows } from "./path.js";
+import { bin, canonical, join, namesFolder } from "./path.js";
 
 // The tab the tree works for: what `--ctx` takes. No folder: herdr-nvim
 // finds where the tab works from its terminals (where its nvim starts). The
@@ -90,14 +90,13 @@ export async function treeMode() {
   return (await appConfig()).tree;
 }
 
-// The system's opener for each platform. The mods run no other program but
-// herdr-nvim and git (js-checks holds them to it).
-const OPENERS = { windows: "explorer.exe", linux: "xdg-open", macos: "open" };
+// `o` opens a row in Zed, on the Mac the app runs on: a local file as is, a
+// remote tab's (`machine`) through Zed's SSH remoting. The mods run no other
+// program but herdr-nvim and Zed (js-checks holds them to it).
+const ZED = "/usr/local/bin/zed";
 
-export async function systemOpen(path) {
-  const opener = OPENERS[window()?.platform] ?? OPENERS.macos;
-  const r = await exec(opener, [native(path)]).catch((e) => ({ code: -1, stderr: String(e) }));
-  // Explorer exits 1 when it did open the file: on Windows only a start
-  // that failed is an error.
-  if (windows() ? r.code === -1 : r.code !== 0) notify({ title: "Cannot open", body: r.stderr || path, level: "error" });
+export async function systemOpen(path, machine = null) {
+  const target = machine ? `ssh://${machine}${path}` : path;
+  const r = await exec(ZED, [target]).catch((e) => ({ code: -1, stderr: String(e) }));
+  if (r.code !== 0) notify({ title: "Cannot open in Zed", body: r.stderr || target, level: "error" });
 }

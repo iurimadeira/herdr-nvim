@@ -278,7 +278,7 @@ app.platform = "windows";
 app.home = "C:\\Users\\Me\\.config\\herdr-app";
 assert.equal(path.bin(), "C:\\Users\\Me\\.config\\herdr-app\\mods\\herdr-nvim\\bin\\herdr-nvim.exe");
 
-// The mods start no program but herdr-nvim and the system's opener (no git,
+// The mods start no program but herdr-nvim and Zed (no git,
 // which herdr-nvim runs; no sh, cat, cp or PowerShell: they differ by OS, or
 // Windows lacks them).
 const started = new Set();
@@ -288,16 +288,28 @@ for (const mod of ["herdr-nvim", "herdr-nvim-header"]) {
     for (const [, program] of source.matchAll(/(?<![.\w])exec\(\s*([^,]+?)\s*,/g)) started.add(program.trim());
   }
 }
-assert.deepEqual([...started].sort(), ["bin()", "opener"]);
+assert.deepEqual([...started].sort(), ["ZED", "bin()"]);
+// `o` opens the row in Zed on this Mac: a local path as is, a remote tab's
+// over Zed's SSH remoting; a failure toasts.
 const { systemOpen } = await import("../mods/herdr-nvim/ops.js");
 const opened = [];
-app.exec = async (cmd, args) => { opened.push([cmd, ...args]); return { code: 1, stdout: "", stderr: "" }; };
-await systemOpen("C:/r/a b.txt");
-app.platform = "linux";
-await systemOpen("/r/a b.txt");
+let zedAnswer = { code: 0, stdout: "", stderr: "" };
+app.exec = async (cmd, args) => { opened.push([cmd, ...args]); return zedAnswer; };
 app.platform = "macos";
+app.notified = [];
 await systemOpen("/r/a b.txt");
-assert.deepEqual(opened, [["explorer.exe", "C:\\r\\a b.txt"], ["xdg-open", "/r/a b.txt"], ["open", "/r/a b.txt"]]);
+await systemOpen("/home/me/proj/x.js", "lab");
+assert.deepEqual(opened, [["/usr/local/bin/zed", "/r/a b.txt"], ["/usr/local/bin/zed", "ssh://lab/home/me/proj/x.js"]]);
+assert.deepEqual(app.notified, []);
+zedAnswer = { code: 1, stdout: "", stderr: "zed: no such thing" };
+await systemOpen("/r/a b.txt");
+app.exec = async () => { throw new Error("ENOENT /usr/local/bin/zed"); };
+await systemOpen("/home/me/proj/x.js", "lab");
+assert.deepEqual(app.notified, [
+  { title: "Cannot open in Zed", body: "zed: no such thing", level: "error" },
+  { title: "Cannot open in Zed", body: "Error: ENOENT /usr/local/bin/zed", level: "error" },
+]);
+app.notified = [];
 
 // Windows paths: every form the app, git and nvim give is one path, compared
 // case aside; a drive's root is a root. Never case-folded on macOS or Linux.
@@ -440,7 +452,8 @@ assert.equal(sourceFor({ space: "box/s1", tab: null }).machine, "box", "a machin
 assert.equal(sourceFor({ space: "box/s1", tab: "t1" }).machine, "box", "an unprefixed tab of a machine space is on its machine");
 assert.equal(sourceFor({ space: "s1", tab: "lab/t1" }).machine, "lab", "the tab's machine first");
 // What a remote tree can't do here says why; a local one can do it all.
-assert.deepEqual(Object.values(sourceFor({ space: "s1", tab: "t1" }).cannot), [false, false, false]);
+assert.deepEqual(Object.values(sourceFor({ space: "s1", tab: "t1" }).cannot), [false, false]);
+assert.equal(sourceFor({ space: "box/s1", tab: "box/t1" }).cannot.systemOpen, undefined, "Zed opens a remote tab's files too");
 assert.ok(Object.values(sourceFor({ space: "box/s1", tab: "box/t1" }).cannot).every((why) => typeof why === "string"));
 
 // Every failure to read a machine is a RemoteError, never no files or no marks.
@@ -673,9 +686,17 @@ app.notified = [];
 // What it can't do there says so, and `/` never searches this machine.
 tree.actions.find();
 assert.equal(tree.filter, null);
-tree.actions.systemOpen(tree.visibleRows()[0]);
 tree.action("rename", tree.visibleRows()[0], treeCx);
-assert.deepEqual(app.notified.map((n) => n.title), ["Not on box", "Not on box", "Not on box"]);
+assert.deepEqual(app.notified.map((n) => n.title), ["Not on box", "Not on box"]);
+// `o` opens the remote row in Zed here, over SSH to its machine.
+const remoteExec = app.exec;
+const zedRemote = [];
+app.exec = async (cmd, args) => { zedRemote.push([cmd, ...args]); return { code: 0, stdout: "", stderr: "" }; };
+tree.actions.systemOpen(tree.visibleRows()[0]);
+await settle();
+app.exec = remoteExec;
+assert.deepEqual(zedRemote, [["/usr/local/bin/zed", `ssh://box${tree.visibleRows()[0].abs}`]]);
+assert.ok(tree.visibleRows()[0].abs.startsWith("/remote/"));
 // Keys and clicks act on what it shows: nothing while the machine fails.
 assert.ok(tree.visibleRows().length > 0);
 tree.error = "box: machine is unavailable";

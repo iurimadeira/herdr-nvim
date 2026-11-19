@@ -512,7 +512,7 @@ export class Tree {
       delete: (row, _rows, cx) => this.action("delete", row, cx),
       yank: (row, _rows, cx) => this.action("yank", row, cx),
       paste: (row, _rows, cx) => this.action("paste", row, cx),
-      systemOpen: (row) => { if (row && this.can("systemOpen")) systemOpen(row.abs); },
+      systemOpen: (row) => { if (row) systemOpen(row.abs, this.model.source.machine); },
       hidden: () => { this.model.showHidden = !this.model.showHidden; },
       ignored: () => { this.model.showIgnored = !this.model.showIgnored; },
       collapse: () => this.model.collapseAll(),

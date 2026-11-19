@@ -42,7 +42,7 @@ const KEYS = [
     recipe: "delete (confirm); to the trash when the person's Snacks says so; their buffers close", on: { d: "delete" } },
   { group: "Files", label: "y p", md: "`y` / `p`", what: "yank paths / paste them here",
     recipe: "yank the paths into nvim's register / paste those files into the row's folder", on: { y: "yank", p: "paste" } },
-  { group: "Files", label: "o", md: "`o`", what: "open with the system app", recipe: "open with the system's app",
+  { group: "Files", label: "o", md: "`o`", what: "open in Zed", recipe: "open in Zed on the Mac (a remote tab's over SSH)",
     on: { o: "systemOpen" } },
   { group: "View", label: "H", md: "`H`", what: "hidden files", recipe: "show hidden files (starts as the person's Snacks explorer has it)",
     on: { H: "hidden" } },

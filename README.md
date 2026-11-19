@@ -156,9 +156,9 @@ command for that machine, and a machine that does not answer shows its error
 and a toast too, once per new error. A desktop build with uncommitted changes
 or not built from a commit matches no companion, so the toast offers no
 command; remote trees need a build from a commit. On a remote tab, tree search
-(`/`), file operations and opening in the system's app show a message instead;
-they, the agent-file picker, annotations and rendered previews remain
-local-only.
+(`/`) and file operations show a message instead; they, the agent-file picker,
+annotations and rendered previews remain local-only. `o` opens the row in Zed
+on the Mac, a remote tab's over SSH (`ssh://<machine>/<path>`).
 
 ## The tree
 

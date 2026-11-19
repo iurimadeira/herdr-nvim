@@ -122,7 +122,7 @@ The tree's keys (LazyVim's Snacks explorer defaults; `?` lists them):
 | `c` | copy the selected rows into the row's folder (confirm); with none, copy to a new name |
 | `d` | delete (confirm); to the trash when the person's Snacks says so; their buffers close |
 | `y` / `p` | yank the paths into nvim's register / paste those files into the row's folder |
-| `o` | open with the system's app |
+| `o` | open in Zed on the Mac (a remote tab's over SSH) |
 | `H` | show hidden files (starts as the person's Snacks explorer has it) |
 | `I` | show git-ignored files (starts as the person's Snacks explorer has it) |
 | `Z` | close every folder |
@@ -219,8 +219,8 @@ The tree's keys (LazyVim's Snacks explorer defaults; `?` lists them):
   - the layout's `files` slot: the tree (`tree-view.js`; listing by `herdr-nvim app-list`,
     marks by `app-git-status`; a local root refreshes on `watchFolder`, a
     remote one polls both every 2 s while the tree shows, never while
-    hidden; search, file operations and the system's app are local-only, and
-    say so on a remote tab);
+    hidden; search and file operations are local-only, and say so on a
+    remote tab; `o` opens in Zed, a remote tab's row over SSH);
   - a floating 0×0 block (`role: "sync"`), always rendered: the controller
     (`sync.js`) that keeps the panel and each tab's nvim pane together, and
     takes the commands `herdr-nvim.pick`, `.reveal`, `.toggle`,

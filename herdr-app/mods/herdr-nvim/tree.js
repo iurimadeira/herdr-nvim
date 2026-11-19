@@ -59,15 +59,14 @@ export function marksFrom(top, status) {
 // folders first, then by name, at most 500) and git marks (`app-git-status`:
 // path key -> "M" | "A" | "D" | "U", {} outside a repo), and what else it can
 // do there (`can`: false, or why not). A remote tab's machine answers the
-// same commands; search, file operations and the system's app work only
-// here (#4).
+// same commands; search and file operations work only here (#4).
 export function sourceFor(ctx) {
   const machine = machineOfContext(ctx);
   const here = (op) => (machine ? `${op} work only on this machine's tabs for now.` : false);
   return {
     remote: Boolean(machine),
     machine,
-    cannot: { find: here("Search"), fs: here("File operations"), systemOpen: here("The system's apps") },
+    cannot: { find: here("Search"), fs: here("File operations") },
     list: async (folder) => {
       const entries = (await app("app-list", folder, machine && ctx, machine))?.entries;
       if (Array.isArray(entries)) return entries;
