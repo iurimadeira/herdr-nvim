@@ -11,7 +11,7 @@ import { focused, layout, nextCommand, notify, panes, readTextFile, run, setShar
 import { previewKind } from "./preview.js";
 import { changesIn, nvim } from "./lib.js";
 import { current, findFiles, fsOp, request, systemOpen, tabOf } from "./ops.js";
-import { basename, canonical, child, dirname, inside, join, key, relative, same } from "./path.js";
+import { basename, canonical, child, dirname, inside, join, key, machineOfContext, relative, same } from "./path.js";
 import { openDialog } from "./dialog.js";
 import { openKeyHelp } from "./keys-help.js";
 import { ACTIONS } from "./tree-keys.js";
@@ -20,8 +20,9 @@ import { goToTree, nvimPanes, panelState } from "./panel.js";
 // The tree key when nvim hasn't said (an nvim from before tree_key): <leader>e
 // with LazyVim's leader.
 const TREE_KEY = ["space", "e"];
-import { GIT_EVERY_MS, TreeModel } from "./tree-model.js";
-import { markOf } from "./tree.js";
+import { TreeModel } from "./tree-model.js";
+import { markOf, remoteCurrent, sourceFor } from "./tree.js";
+import { keepFresh, remoteToast } from "./tree-refresh.js";
 import { KeyboardHandover, TabRoots } from "./tree-parts.js";
 
 const HINT = "? keys";
@@ -36,8 +37,11 @@ function place(previous) {
   const space = spaces().find((s) => s.id === f?.space) ?? spaces().find((s) => s.active);
   const pane = f?.pane ? panes().find((p) => p.pane === f.pane) : null;
   const cwd = canonical(pane?.cwd || (f?.tab === previous?.tab ? previous?.cwd : null) || f?.cwd || space?.folder || null);
-  return { space: space?.id ?? null, tab: f?.tab ?? null, cwd, machine: space?.machine ?? null };
+  const at = { space: space?.id ?? null, tab: f?.tab ?? null };
+  return { ...at, cwd, machine: machineOfContext(at) };
 }
+
+const filesShown = () => Boolean(panelState(layout())?.files);
 
 export class Tree {
   constructor(cx) {
@@ -56,11 +60,14 @@ export class Tree {
       for (;;) {
         const command = await nextCommand();
         if (command === "focus") {
-          // The selection stays where the person left it: nvim's file changes
-          // already move it (watchCurrent), and cmd-shift-e / <leader>E reveal
-          // on purpose (shared "herdr-nvim.reveal"). Only the first arrival,
-          // before the tree knows nvim's file, picks it (else the first row).
-          const keep = this.overlayOpen || this.pressing || this.current != null;
+          // On a local tab the selection stays where the person left it:
+          // nvim's file changes already move it (watchCurrent), and
+          // cmd-shift-e / <leader>E reveal on purpose (shared
+          // "herdr-nvim.reveal"). Only the first arrival since the tree moved
+          // to the tab picks nvim's file (else the first row). A remote tab's
+          // nvim is not watched: every arrival picks its file and folder.
+          const keep = this.overlayOpen || this.pressing || (!this.place?.machine && this.rootTab != null && this.arrivedTab === this.rootTab);
+          this.arrivedTab = this.rootTab;
           this.overlayOpen = this.pressing = false;
           this.handover.arrive(cx);
           cx.notify();
@@ -78,28 +85,70 @@ export class Tree {
   }
 
   // Follow the focused tab. The root is the tab's folder (where the tab's
-  // nvim works, as a real path), or one the person chose with `.` / ⌫ for
-  // this tab; focusing another pane of the tab never moves it.
+  // nvim works, as a real path; before it runs, where it would start), or
+  // one the person chose with `.` / ⌫ for this tab; focusing another pane of
+  // the tab never moves it. Local or remote alike.
   follow(cx) {
     const next = place(this.place);
     const moved = next.tab !== this.place?.tab || next.machine !== this.place?.machine || (!this.rootTab && next.cwd);
     this.place = next;
-    if (!moved) return;
+    if (!moved) return this.askRemote(cx);
     // Until the new tab's state file is known, none is read (the old tab's
     // would put its file and folder in this one).
     this.watching = null;
-    if (next.machine || !next.cwd) {
-      this.rootTab = next.tab;
+    this.rootTab = next.tab;
+    this.current = null;
+    this.arrivedTab = null;
+    this.asking = null;
+    if (!next.cwd) {
       this.tabRoot = null;
       return this.setRoot(null, cx);
     }
-    this.rootTab = next.tab;
+    // A remote tab's nvim is on its machine, with no state file here to
+    // watch: its machine is asked once per arrival on the tab, and not
+    // before the tree shows (`askRemote`); the tree moves to nvim's folder
+    // and file again when it gets the keyboard (`revealCurrent`), not as
+    // nvim changes files.
+    if (next.machine) {
+      this.asking = next;
+      return this.askRemote(cx);
+    }
     cx.spawn(async (cx) => {
       const now = await current(next);
       if (this.place?.tab !== next.tab) return;
       this.adopt(next.tab, now.tab_root ?? next.cwd, cx);
       this.watchCurrent(next, cx, now);
     });
+  }
+
+  // The remote tab's folder, asked once the tree shows (`follow` runs on
+  // each render).
+  askRemote(cx) {
+    const at = this.asking;
+    if (!at || !filesShown()) return;
+    this.asking = null;
+    cx.spawn(async (cx) => {
+      const now = await this.ask(at);
+      if (this.place?.tab !== at.tab) return;
+      this.adopt(at.tab, now?.tab_root ?? at.cwd, cx);
+    });
+  }
+
+  // What the tab's nvim shows ({file, watch, tab_root}), as `current`. A
+  // remote tab's machine's failures toast as its listing's do (`toastOnce`),
+  // and answer null.
+  async ask(at) {
+    if (!at.machine) return current(at);
+    return remoteCurrent(tabOf(at)).catch((e) => (this.toastOnce(remoteToast(e)), null));
+  }
+
+  // One toast per remote failure, whichever asked (the listing, the poll,
+  // nvim's file), until the machine answers a listing again.
+  toastOnce(toast) {
+    const said = `${toast.title}\n${toast.body}`;
+    if (said === this.toasted) return;
+    this.toasted = said;
+    notify(toast);
   }
 
   // The tab's folder is `tabRoot`: show the root chosen for this tab, unless
@@ -128,48 +177,46 @@ export class Tree {
   // back to a tab) keeps the loop, the listing and the selection.
   setRoot(root, cx) {
     if (this.rootTab && root) this.roots.remember(this.rootTab, this.tabRoot, root);
-    if (root && root === this.model.root && !this.error) return;
+    const machine = this.place?.machine ?? null;
+    if (root && root === this.model.root && machine === this.model.source.machine && !this.error) return;
     const gen = (this.rootGen = (this.rootGen ?? 0) + 1);
     const keep = { hidden: this.model.showHidden, ignored: this.model.showIgnored };
-    this.model.reset(root);
+    this.model.reset(root, sourceFor({ ...tabOf(this.place ?? {}), cwd: root }));
     Object.assign(this.model, { showHidden: keep.hidden, showIgnored: keep.ignored });
     this.selected = 0;
     this.picked.clear();
     this.filter = null;
     this.error = null;
     if (!root) return;
+    const alive = () => this.rootGen === gen;
     cx.spawn(async (cx) => {
       try {
-        await this.model.reload();
-        cx.notify();
-        while (this.rootGen === gen) {
-          const changed = await changesIn(root);
-          if (this.rootGen !== gen) return;
+        await keepFresh({
+          model: this.model,
+          alive,
+          shown: filesShown,
+          changes: () => changesIn(root),
+          // A remote root's poll ends early when the tree shows again (`render`).
+          sleep: (ms) => new Promise((done) => { this.wake = done; cx.sleep(ms).then(done); }),
+          redraw: () => cx.notify(),
           // Hidden (Files closed): no listing or git status for every change
-          // (a build makes many); it catches up once when shown (`render`).
-          if (!panelState(layout())?.files) {
-            this.stale = true;
-            continue;
-          }
-          const { marks } = await this.model.reloadChanged(changed);
-          if (marks === "none") continue; // nothing the tree shows changed
-          cx.notify();
-          if (marks === "later" && !this.marksDue) {
-            this.marksDue = true;
-            cx.spawn(async (cx) => {
-              await cx.sleep(GIT_EVERY_MS);
-              this.marksDue = false;
-              if (this.rootGen !== gen) return;
-              await this.model.refreshMarks();
-              cx.notify();
-            });
-          }
-        }
+          // (a build makes many), and nothing asked of a remote machine; it
+          // catches up once when shown (`render`).
+          hidden: () => { this.stale = true; },
+          failed: (e) => {
+            this.error = e && String(e.message ?? e);
+            if (!e) this.toasted = null;
+            cx.notify();
+          },
+          notify: (toast) => this.toastOnce(toast),
+        });
       } catch (e) {
-        if (this.rootGen === gen) { this.error = String(e); cx.notify(); }
+        if (alive()) { this.error = String(e); cx.notify(); }
       }
     });
-    if (!this.defaults) {
+    // fs.lua's defaults come from the tab's nvim, which a remote tab's tree
+    // doesn't ask (#4).
+    if (!this.defaults && !this.model.source.cannot.fs) {
       this.defaults = true;
       cx.spawn(async (cx) => {
         // Quiet: the tree only showed; with no Neovim, the card waits for a
@@ -239,7 +286,7 @@ export class Tree {
     // Once the tree watches the tab's state file, it holds both (real paths,
     // app.lua `write_state`): no process. Before, herdr-nvim answers.
     const state = this.watching && this.watchingTab === this.place.tab ? await this.nvimState() : null;
-    const { file, tab_root } = state?.cwd ? { file: state.file ?? null, tab_root: state.cwd } : await current(this.place);
+    const { file, tab_root } = state?.cwd ? { file: state.file ?? null, tab_root: state.cwd } : ((await this.ask(this.place)) ?? {});
     if (seq !== this.revealSeq) return;
     if (tab_root && !same(tab_root, this.tabRoot)) this.adopt(this.rootTab, tab_root, cx);
     if (file && inside(file, this.model.root ?? "")) await this.reveal(file, cx);
@@ -262,6 +309,20 @@ export class Tree {
     this.current = row;
     this.revealing = row;
     cx.notify();
+  }
+
+  // What the tree shows and its keys and clicks act on: a remote machine that
+  // can't list shows why, not rows it may no longer have.
+  visibleRows() {
+    return this.error && this.model.source.remote ? [] : this.rows();
+  }
+
+  // Whether the tree can do `what` here (tree.js `sourceFor`); if not, a
+  // toast says why.
+  can(what) {
+    const why = this.model.source.cannot[what];
+    if (why) notify({ title: `Not on ${this.model.source.machine}`, body: why, level: "info", timeout: 3000 });
+    return !why;
   }
 
   rows() {
@@ -318,6 +379,7 @@ export class Tree {
   }
 
   action(name, row, cx) {
+    if (!this.can("fs")) return;
     const rel = (path) => relative(path, this.model.root) ?? path;
     switch (name) {
       case "add":
@@ -450,16 +512,24 @@ export class Tree {
       delete: (row, _rows, cx) => this.action("delete", row, cx),
       yank: (row, _rows, cx) => this.action("yank", row, cx),
       paste: (row, _rows, cx) => this.action("paste", row, cx),
-      systemOpen: (row) => { if (row) systemOpen(row.abs); },
+      systemOpen: (row) => { if (row && this.can("systemOpen")) systemOpen(row.abs); },
       hidden: () => { this.model.showHidden = !this.model.showHidden; },
       ignored: () => { this.model.showIgnored = !this.model.showIgnored; },
       collapse: () => this.model.collapseAll(),
-      reload: (_row, _rows, cx) => cx.spawn(async (cx) => { await this.model.reload(); cx.notify(); }),
+      // A remote root lists again on its poll, woken now (`render`).
+      reload: (_row, _rows, cx) => {
+        if (this.model.source.remote) return this.wake?.();
+        cx.spawn(async (cx) => { await this.model.reload(); cx.notify(); });
+      },
       rootHere: (row, _rows, cx) => { if (row) this.setRoot(this.dirOf(row), cx); },
       rootUp: (_row, _rows, cx) => { if (this.model.root !== dirname(this.model.root)) this.setRoot(dirname(this.model.root), cx); },
       rootHome: (_row, _rows, cx) => { if (this.tabRoot) this.setRoot(this.tabRoot, cx); },
       help: () => { this.overlayOpen = true; openKeyHelp(this.treeKey ?? TREE_KEY); },
-      find: () => { this.filter = { query: "", results: [], seq: 0, root: this.findRoot() }; this.selected = 0; },
+      find: () => {
+        if (!this.can("find")) return;
+        this.filter = { query: "", results: [], seq: 0, root: this.findRoot() };
+        this.selected = 0;
+      },
       leave: () => { this.handover.cancel(); run("pane.go", { direction: "left" }); },
     };
   }
@@ -573,7 +643,7 @@ export class Tree {
   // A click on a row (the list reports its key, the row's path): select it,
   // take the keyboard, open it.
   clicked(key, cx) {
-    const rows = this.rows(), at = rows.findIndex((r) => r.abs === key);
+    const rows = this.visibleRows(), at = rows.findIndex((r) => r.abs === key);
     if (at < 0) return;
     this.selected = at;
     this.scrolledTo = this.scrollKey(rows[at]); // already on screen: it was clicked
@@ -581,15 +651,26 @@ export class Tree {
     cx.spawn(async (cx) => this.openRow(rows[at], cx));
   }
 
+  // The footer: where the keys are, and on a remote tab what they can't do there.
+  hint() {
+    const { remote, machine } = this.model.source;
+    return remote ? `${HINT} · on ${machine}: browse and open; search and file operations here only` : HINT;
+  }
+
   render(cx) {
     this.follow(cx);
-    if (this.stale) {
+    if (this.stale && filesShown()) {
       this.stale = false;
-      const gen = this.rootGen;
-      cx.spawn(async (cx) => {
-        await this.model.reload().catch(() => {});
-        if (this.rootGen === gen) cx.notify();
-      });
+      // A remote root catches up on its poll, woken now (one way to ask its
+      // machine, with its errors and toasts).
+      if (this.model.source.remote) this.wake?.();
+      else {
+        const gen = this.rootGen;
+        cx.spawn(async (cx) => {
+          await this.model.reload().catch(() => {});
+          if (this.rootGen === gen) cx.notify();
+        });
+      }
     }
     const reveal = shared("herdr-nvim.reveal");
     if (reveal && reveal.n !== this.revealed) {
@@ -604,7 +685,7 @@ export class Tree {
     // lost it, and the app's focus doesn't change when it goes back to the
     // same nvim pane, so nvim reports its FocusGained (next to the current
     // file, which this tree watches): every such wake renders this again.
-    const t = theme(), rows = this.rows(), focusedNow = this.handle.is_focused();
+    const t = theme(), rows = this.visibleRows(), focusedNow = this.handle.is_focused();
     this.drawnFocused = focusedNow;
     if (this.revealing && !this.filter) {
       const at = rows.findIndex((r) => r.abs === this.revealing);
@@ -619,8 +700,7 @@ export class Tree {
       this.scrolledTo = key;
       this.scroll.scroll_to_item(this.selected);
     }
-    const empty = this.place?.machine ? `This space is on ${this.place.machine}; browse its files with Neovim's own explorer.`
-      : this.error ?? (this.filter ? (this.filter.query ? "No match" : "Type to find a file") : !this.model.root ? "No folder" : this.model.entries.has(this.model.root) ? "No files" : "Loading files…");
+    const empty = this.error ?? (this.filter ? (this.filter.query ? "No match" : "Type to find a file") : !this.model.root ? "No folder" : this.model.entries.has(this.model.root) ? "No files" : "Loading files…");
     return v_flex().id("herdr-nvim-files").size_full().min_h(0).rounded(10).overflow_hidden()
       // The controller hands this tree the keyboard with `pane.go`, which
       // needs it laid out: say when it is.
@@ -634,7 +714,7 @@ export class Tree {
       })
       .bg(t.background).border_1().border_color(focusedNow ? t.accent : t.border).text_color(t.foreground).text_size(13)
       // The rows as they are at the press, not as this render saw them.
-      .track_focus(this.handle).on_key_down((e, cx) => this.key(e, this.rows(), cx))
+      .track_focus(this.handle).on_key_down((e, cx) => this.key(e, this.visibleRows(), cx))
       .on_mouse_down("left", (_e, cx) => this.pressed(cx))
       .child(this.header(t))
       .when(Boolean(this.filter), (el) => el.child(this.filterBar(t)))
@@ -648,6 +728,6 @@ export class Tree {
             .track_scroll(this.scroll).size_full()
             .on_item_click((key, cx) => this.clicked(key, cx)))
           .child(Scrollbar.vertical("herdr-nvim-tree").absolute().inset_0()))
-      .child(div().flex_none().px(12).py(6).border_t(1).border_color(t.border).text_size(11).text_color(t.dim).child(HINT));
+      .child(div().flex_none().px(12).py(6).border_t(1).border_color(t.border).text_size(11).text_color(t.dim).child(this.hint()));
   }
 }

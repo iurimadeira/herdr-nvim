@@ -41,26 +41,36 @@ register(`data:text/javascript,${encodeURIComponent(`
     if (["herdr", "gpui-kit", "gpui-base"].includes(spec)) return { url: ${JSON.stringify(new URL("./herdr-stub.mjs", import.meta.url).href)}, shortCircuit: true };
     return next(spec, ctx);
   }`)}`);
-const { app } = await import("./herdr-stub.mjs");
-const { gitMarks, listFolder, markOf } = await import("../mods/herdr-nvim/tree.js");
-const { TreeModel } = await import("../mods/herdr-nvim/tree-model.js");
+const { app, command } = await import("./herdr-stub.mjs");
+const { markOf, sourceFor } = await import("../mods/herdr-nvim/tree.js");
+const { TreeModel, fatalListing } = await import("../mods/herdr-nvim/tree-model.js");
 const { panelState } = await import("../mods/herdr-nvim/panel.js");
 const { request } = await import("../mods/herdr-nvim/ops.js");
 const path = await import("../mods/herdr-nvim/path.js");
 const { Sync } = await import("../mods/herdr-nvim/sync.js");
 const ok = (stdout) => ({ code: 0, stdout, stderr: "" });
 
-// Git marks: an untracked folder comes once, as `dir/`; it and the files in
-// it are new.
-app.exec = async (cmd, args) =>
-  args[0] === "rev-parse" ? ok("/r\n")
-  : ok(" M src/a.js\0?? newdir/\0A  b.js\0 D gone.txt\0UU c.js\0");
-const marks = await gitMarks("/r");
+// Git marks are herdr-nvim's `app-git-status` (src/app/list.rs runs git):
+// an untracked folder comes once, as `dir/`; it and the files in it are new.
+// Outside a repo, or when it fails, there are none.
+const here = sourceFor(null);
+const status = " M src/a.js\0?? newdir/\0A  b.js\0 D gone.txt\0UU c.js\0";
+app.exec = async (cmd, args) => {
+  assert.deepEqual(args, ["app-git-status", "/r"], "a local tab's marks are read here, with no --ctx");
+  return ok(JSON.stringify({ top: "/r", status }));
+};
+const marks = await here.marks("/r");
 assert.deepEqual(marks, { "/r/src/a.js": "M", "/r/newdir": "A", "/r/b.js": "A", "/r/gone.txt": "D", "/r/c.js": "U" });
 assert.equal(markOf(marks, "/r/newdir"), "A");
 assert.equal(markOf(marks, "/r/newdir/deep/x.md"), "A");
 assert.equal(markOf(marks, "/r/src/a.js"), "M");
 assert.equal(markOf(marks, "/r/src/other.js"), null);
+app.exec = async () => ok(JSON.stringify({ top: null, status: "" }));
+assert.deepEqual(await here.marks("/elsewhere"), {});
+app.exec = async () => ok("not json");
+assert.deepEqual(await here.marks("/r"), {});
+app.exec = async () => ({ code: 1, stdout: "", stderr: "herdr-nvim: boom\n" });
+assert.deepEqual(await here.marks("/r"), {});
 
 // A folder's listing is herdr-nvim's (`app-list`, src/app/list.rs, which
 // sorts it): its entries in its order, each saying whether git ignores it.
@@ -69,11 +79,11 @@ const listing = (...entries) => ok(JSON.stringify({ entries, truncated: false })
 const bin = "/nonexistent-app-home/mods/herdr-nvim/bin/herdr-nvim";
 app.exec = async (cmd, args) => (cmd === bin && args[0] === "app-list" && args[1] === "/r"
   ? listing(entry("build", true, true), entry("src", true), entry(".env"), entry("a.txt", false, true)) : ok(""));
-const r = await listFolder("/r");
+const r = await here.list("/r");
 assert.deepEqual(r.map((e) => e.name), ["build", "src", ".env", "a.txt"]);
 assert.deepEqual(r.filter((e) => e.ignored).map((e) => e.name), ["build", "a.txt"]);
 app.exec = async () => ({ code: 1, stdout: "", stderr: "herdr-nvim: not a folder: /gone\n" });
-await assert.rejects(listFolder("/gone"), /^Error: not a folder: \/gone$/);
+await assert.rejects(here.list("/gone"), /^Error: not a folder: \/gone$/);
 
 // The tree model: a watch batch lists again only the folders on screen it
 // touches; a build in an ignored folder lists nothing; the same listing
@@ -268,8 +278,9 @@ app.platform = "windows";
 app.home = "C:\\Users\\Me\\.config\\herdr-app";
 assert.equal(path.bin(), "C:\\Users\\Me\\.config\\herdr-app\\mods\\herdr-nvim\\bin\\herdr-nvim.exe");
 
-// The mods start no program but herdr-nvim, git and the system's opener (no
-// sh, cat, cp or PowerShell: they differ by OS, or Windows lacks them).
+// The mods start no program but herdr-nvim and the system's opener (no git,
+// which herdr-nvim runs; no sh, cat, cp or PowerShell: they differ by OS, or
+// Windows lacks them).
 const started = new Set();
 for (const mod of ["herdr-nvim", "herdr-nvim-header"]) {
   for (const file of readdirSync(new URL(`${mod}/`, modsDir)).filter((f) => f.endsWith(".js"))) {
@@ -277,7 +288,7 @@ for (const mod of ["herdr-nvim", "herdr-nvim-header"]) {
     for (const [, program] of source.matchAll(/(?<![.\w])exec\(\s*([^,]+?)\s*,/g)) started.add(program.trim());
   }
 }
-assert.deepEqual([...started].sort(), ['"git"', "bin()", "opener"]);
+assert.deepEqual([...started].sort(), ["bin()", "opener"]);
 const { systemOpen } = await import("../mods/herdr-nvim/ops.js");
 const opened = [];
 app.exec = async (cmd, args) => { opened.push([cmd, ...args]); return { code: 1, stdout: "", stderr: "" }; };
@@ -323,8 +334,7 @@ const winListings = {
 };
 app.exec = async (cmd, args, opts) => {
   if (cmd === path.bin() && args[0] === "app-list") return winListings[args[1]];
-  if (args[0] === "rev-parse") return ok("c:/R\n");
-  return ok(" M Src/A.js\0?? x.md\0");
+  return ok(JSON.stringify({ top: "c:/R", status: " M Src/A.js\0?? x.md\0" }));
 };
 const winModel = new TreeModel();
 winModel.reset("C:/r");
@@ -386,5 +396,290 @@ await remoteSync.toggle(place(), "close");
 assert.deepEqual(app.ran, [], "remote toggles must use the machine-aware Rust path");
 await remoteSync.startSwap("box/t1", "/remote/image.png", { notify() {} });
 assert.deepEqual(app.ran, [], "unsupported remote previews must not create local preview panes");
+
+// The Files panel on a remote tab follows the local rule: shown where the
+// tab's nvim (there) is, kept when Files opens it, but Files never starts
+// nvim on the machine (`local`).
+assert.deepEqual(wanted(tab(true, false), tab(false, false), { ...opts, local: false }), { kept: false, nvim: false });
+app.terminals = [{ address: "box/t9", state: "live", labels: { "herdr-nvim.sidebar": "t1" } }];
+app.panes = [{ pane: "box/p9", terminal: "box/t9", tab: "box/t1" }];
+app.layout = stack("files", true);
+app.exec = async (_cmd, args) => assert.fail(`no herdr-nvim ${args[0]} for a remote tab's panel`);
+app.ran = [];
+const remoteLook = new Sync(cx);
+remoteLook.look(cx); // the remote nvim without its tree: show the panel
+assert.deepEqual(app.ran.map(([name]) => name), ["layout.select", "layout.show"]);
+app.layout = stack("files");
+remoteLook.look(cx);
+await new Promise((done) => setTimeout(done, 20));
+app.terminals = [];
+app.panes = [];
+app.layout = stack("files", true);
+app.ran = [];
+const remoteFiles0 = new Sync(cx);
+remoteFiles0.look(cx); // no nvim, no panel
+app.layout = stack("files"); // Files pressed
+remoteFiles0.look(cx);
+remoteFiles0.look(cx);
+await new Promise((done) => setTimeout(done, 20));
+assert.deepEqual(app.ran, [], "Files on a remote tab shows the tree and starts no nvim there");
+
+// A remote tab's tree: its machine's herdr-nvim lists and reads git there
+// (src/app/companion.rs), the same output a local tree reads here, so the
+// rows and marks are a local tree's.
+const { RemoteError, marksFrom } = await import("../mods/herdr-nvim/tree.js");
+const { POLL_MS, keepFresh, remoteToast } = await import("../mods/herdr-nvim/tree-refresh.js");
+const { Tree } = await import("../mods/herdr-nvim/tree-view.js");
+const { notify } = await import("./herdr-stub.mjs");
+assert.deepEqual(marksFrom("/r", status), marks, "remote marks are parsed as local ones");
+
+// Whose machine: the tab's, else its space's (src/app/remote.rs `machine_of`).
+assert.equal(sourceFor({ space: "s1", tab: "t1" }).remote, false, "a local tab is read here");
+assert.equal(sourceFor({ space: "box/s1", tab: "box/t1" }).machine, "box");
+assert.equal(sourceFor({ space: "box/s1", tab: null }).machine, "box", "a machine space with no tab is on its machine");
+assert.equal(sourceFor({ space: "box/s1", tab: "t1" }).machine, "box", "an unprefixed tab of a machine space is on its machine");
+assert.equal(sourceFor({ space: "s1", tab: "lab/t1" }).machine, "lab", "the tab's machine first");
+// What a remote tree can't do here says why; a local one can do it all.
+assert.deepEqual(Object.values(sourceFor({ space: "s1", tab: "t1" }).cannot), [false, false, false]);
+assert.ok(Object.values(sourceFor({ space: "box/s1", tab: "box/t1" }).cannot).every((why) => typeof why === "string"));
+
+// Every failure to read a machine is a RemoteError, never no files or no marks.
+const remoteCtx = { space: "box/s1", tab: "box/t1", terminal: null, cwd: "/remote" };
+const broken = sourceFor(remoteCtx);
+app.exec = async () => ok("not json");
+await assert.rejects(broken.list("/remote"), (e) => e instanceof RemoteError && e.machine === "box" && /not an answer: not json/.test(e.message));
+await assert.rejects(broken.marks("/remote"), RemoteError, "a remote git status it can't read is an error");
+for (const answer of ["null", "{}"]) {
+  app.exec = async () => ok(answer);
+  await assert.rejects(broken.list("/remote"), (e) => e instanceof RemoteError && /no entries/.test(e.message), answer);
+}
+app.exec = async () => { throw new Error("spawn failed"); };
+await assert.rejects(broken.list("/remote"), (e) => e instanceof RemoteError && /spawn failed/.test(e.message));
+app.exec = async () => ({ code: 1, stdout: "", stderr: "herdr-nvim: box: machine is unavailable\n" });
+await assert.rejects(broken.list("/remote"), (e) => e instanceof RemoteError && e.message === "box: machine is unavailable" && !e.companion);
+
+// Which listing failures fail the whole tree: the root's on a machine, or a
+// machine whose herdr-nvim can't serve this build; never a subfolder gone
+// meanwhile, never a local one.
+const goneThere = new RemoteError("box: not a folder: /remote/src", "box");
+assert.equal(fatalListing(goneThere, "/remote", "/remote"), true);
+assert.equal(fatalListing(goneThere, "/remote/src", "/remote"), false);
+assert.equal(fatalListing(new RemoteError("missing", "box", { problem: "missing" }), "/remote/src", "/remote"), true);
+assert.equal(fatalListing(new Error("not a folder: /r"), "/r", "/r"), false);
+
+// A new source for the same root (another machine): what the last one still
+// had on its way never lands.
+const late = [];
+const slowSource = { remote: true, machine: "old", cannot: {}, list: () => new Promise((done) => late.push(() => done([entry("old.txt")]))), marks: () => new Promise((done) => late.push(() => done({ "/remote/old.txt": "M" }))) };
+const switched = new TreeModel();
+switched.reset("/remote", slowSource);
+const lateWork = Promise.all([switched.load("/remote"), switched.refreshMarks()]);
+switched.reset("/remote", { remote: true, machine: "box", cannot: {}, list: async () => [entry("new.txt")], marks: async () => ({}) });
+await switched.reload();
+late.forEach((land) => land());
+await lateWork;
+assert.deepEqual(switched.rows().map((r) => r.abs), ["/remote/new.txt"]);
+assert.deepEqual(switched.marks, {});
+
+const remoteFiles = { "/remote": [entry("src", true), entry("x.md")] };
+let remoteCalls = [];
+let companion = null;
+let goneOnMachine = null;
+let unreachable = false;
+app.exec = async (cmd, args) => {
+  assert.equal(cmd, bin);
+  assert.deepEqual(args.slice(-2), ["--ctx", JSON.stringify(remoteCtx)]);
+  remoteCalls.push(args.slice(0, 2));
+  if (companion) return { code: 4, stdout: JSON.stringify({ companion }), stderr: `herdr-nvim: ${companion.message}\n` };
+  if (unreachable) return { code: 1, stdout: "", stderr: "herdr-nvim: box: machine is unavailable\n" };
+  if (args[1] === goneOnMachine) return { code: 1, stdout: "", stderr: `herdr-nvim: box: not a folder: ${goneOnMachine}\n` };
+  if (args[0] === "app-git-status") return ok(JSON.stringify({ top: "/remote", status: "?? x.md\0" }));
+  return ok(JSON.stringify({ entries: remoteFiles[args[1]] ?? [], truncated: false }));
+};
+const remoteModel = new TreeModel();
+remoteModel.reset("/remote", sourceFor(remoteCtx));
+await remoteModel.reload();
+assert.deepEqual(remoteModel.rows().map((r) => r.abs), ["/remote/src", "/remote/x.md"]);
+assert.equal(markOf(remoteModel.marks, "/remote/x.md"), "A");
+assert.deepEqual(remoteCalls, [["app-list", "/remote"], ["app-git-status", "/remote"]]);
+// An open folder removed there meanwhile keeps its rows, as a local one does.
+remoteFiles["/remote/src"] = [entry("a.js")];
+await remoteModel.toggle("/remote/src");
+goneOnMachine = "/remote/src";
+await remoteModel.reload();
+assert.deepEqual(remoteModel.rows().map((r) => r.abs), ["/remote/src", "/remote/src/a.js", "/remote/x.md"]);
+goneOnMachine = "/remote";
+await assert.rejects(remoteModel.reload(), RemoteError, "a root it can't list is an error");
+goneOnMachine = null;
+await remoteModel.toggle("/remote/src");
+const install = "cargo install --locked --root ~/.local --git https://github.com/iurimadeira/herdr-nvim --rev abc herdr-nvim";
+companion = { machine: "box", problem: "missing", install, title: "herdr-nvim is not installed on box", remedy: `install it there: ${install}`, message: `herdr-nvim is not installed on box; install it there: ${install}` };
+await assert.rejects(remoteModel.reload(), (e) => e instanceof RemoteError && e.companion.machine === "box");
+companion = null;
+
+// The toast is herdr-nvim's own wording (companion.rs `title`, `remedy`),
+// also for a build no companion can match (no install command); any other
+// failure there names the machine and says what it answered.
+const dirty = { machine: "box", problem: "mismatch", install: null, title: "herdr-nvim on box is 1.0.0 (x), not 1.3.1 (y-dirty)", remedy: "this desktop build has uncommitted changes, so no companion matches it; use a build from a commit" };
+assert.deepEqual(remoteToast(new RemoteError("m", "box", dirty)), { title: dirty.title, body: dirty.remedy, level: "error" });
+assert.deepEqual(remoteToast(new RemoteError("box: machine is unavailable", "box")), { title: "Cannot list files on box", body: "box: machine is unavailable", level: "error" });
+
+// Polling: every POLL_MS while the tree shows; while hidden, even right
+// after the root is set, nothing is asked of the machine. A file made there
+// shows on the next poll. A failure toasts once per distinct message, and
+// the tree comes back once the machine answers.
+const ticks = [];
+const sleep = (ms) => { assert.equal(ms, POLL_MS); return new Promise((done) => ticks.push(done)); };
+const settle = async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); };
+const tick = async () => { ticks.shift()(); await settle(); };
+let shownNow = false, alive = true, errors = [], hiddenTimes = 0;
+remoteCalls = [];
+app.notified = [];
+const polled = new TreeModel();
+polled.reset("/remote", sourceFor(remoteCtx));
+const loop = keepFresh({
+  model: polled, alive: () => alive, shown: () => shownNow, sleep, notify,
+  changes: () => assert.fail("a remote root has no folder watch"),
+  redraw() {}, hidden: () => hiddenTimes++, failed: (e) => errors.push(e && e.message),
+});
+await settle();
+assert.deepEqual(remoteCalls, [], "nothing asked while hidden, even when set");
+assert.equal(hiddenTimes, 1, "set while hidden: marked to catch up");
+for (let i = 0; i < 3; i++) await tick();
+assert.deepEqual(remoteCalls, [], "no remote calls while hidden");
+shownNow = true;
+remoteFiles["/remote"] = [entry("src", true), entry("new.txt"), entry("x.md")];
+await tick();
+assert.deepEqual(polled.rows().map((r) => r.abs), ["/remote/src", "/remote/new.txt", "/remote/x.md"]);
+assert.deepEqual(remoteCalls.map((c) => c[0]), ["app-list", "app-git-status"]);
+companion = { ...dirty, install, remedy: `install it there: ${install}`, message: `${dirty.title}; install it there: ${install}` };
+await tick();
+await tick();
+assert.equal(app.notified.length, 1, "one toast, not one per poll");
+assert.deepEqual(app.notified[0], { title: dirty.title, body: `install it there: ${install}`, level: "error" });
+companion = null;
+await tick();
+unreachable = true;
+await tick();
+await tick();
+assert.equal(app.notified.length, 2, "an unreachable machine toasts too, once");
+assert.deepEqual(app.notified[1], { title: "Cannot list files on box", body: "box: machine is unavailable", level: "error" });
+unreachable = false;
+await tick();
+assert.deepEqual(errors, [`${dirty.title}; install it there: ${install}`, null, "box: machine is unavailable", null]);
+alive = false;
+await tick();
+await loop;
+
+// The tree on a machine space's tab follows the local rule: rooted where the
+// tab's nvim there works (asked once per arrival, never while Files is
+// hidden), its file revealed whenever the tree gets the keyboard; it never
+// follows nvim's file meanwhile, and every listing goes to the machine with
+// the tab's bare context.
+// First a local tab: its selection stays across keyboard arrivals, even
+// with no file of nvim's in the root; a tab moved to reveals on its first.
+const treeCx = { focus_handle: () => ({ is_focused: () => false, focus() {} }), spawn: (fn) => { fn(treeCx); }, notify() {}, sleep: (ms) => new Promise((done) => setTimeout(done, ms).unref()) };
+const nvimHere = { "l1": { file: null, watch: null, tab_root: "/r" }, "l2": { file: "/r/b.js", watch: null, tab_root: "/r" } };
+app.spaces = [{ id: "s", folder: "/r", active: true }];
+app.focused = { space: "s", tab: "l1", pane: "p1", terminal: "t1" };
+app.panes = [{ pane: "p1", terminal: "t1", tab: "l1", cwd: "/r" }, { pane: "p2", terminal: "t2", tab: "l2", cwd: "/r" }];
+app.layout = stack("files");
+app.exec = async (_cmd, args) => {
+  if (args[0] === "app-current") return ok(JSON.stringify(nvimHere[JSON.parse(args.at(-1)).tab]));
+  if (args[0] === "app-list") return ok(JSON.stringify({ entries: [entry("a.js"), entry("b.js"), entry("c.js")], truncated: false }));
+  if (args[0] === "app-git-status") return ok(JSON.stringify({ top: null, status: "" }));
+  return ok("{}");
+};
+const tree = new Tree(treeCx);
+tree.follow(treeCx);
+await settle();
+assert.equal(tree.model.root, "/r");
+command("focus");
+await settle();
+assert.equal(tree.selected, 0, "the first arrival, with no file of nvim's: the first row");
+tree.selected = 2;
+command("focus");
+await settle();
+command("focus");
+await settle();
+assert.equal(tree.selected, 2, "a later arrival on a local tab moved the person's selection");
+app.focused = { space: "s", tab: "l2", pane: "p2", terminal: "t2" };
+tree.follow(treeCx);
+await settle();
+tree.selected = 0;
+command("focus");
+await settle();
+assert.equal(tree.current, "/r/b.js", "the first arrival on the tab moved to reveals nvim's file");
+assert.equal(tree.revealing, "/r/b.js", "render selects it");
+
+app.spaces = [{ id: "box/s1", machine: "box", folder: "/remote", active: true }];
+app.focused = { space: "box/s1", tab: "box/t1", pane: "box/p1", terminal: "box/t7" };
+app.panes = [{ pane: "box/p1", terminal: "box/t7", tab: "box/t1", cwd: "/remote/work" }];
+app.layout = stack("files", true);
+app.notified = [];
+app.overlays = [];
+const asked = [];
+const there = { "/remote/work": [entry("w.txt")], "/remote/proj": [entry("src", true)], "/remote/proj/src": [entry("a.js"), entry("b.js")] };
+let nvimThere = { file: "/remote/proj/src/a.js", watch: null, tab_root: "/remote/proj" };
+let currentFails = null;
+app.exec = async (cmd, args) => {
+  assert.equal(cmd, bin);
+  asked.push([args[0], args[1], JSON.parse(args.at(-1))]);
+  if (args[0] === "app-current") {
+    assert.equal(args.length, 3, args.join(" "));
+    return currentFails ?? ok(JSON.stringify(nvimThere));
+  }
+  if (args[0] === "app-git-status") return ok(JSON.stringify({ top: null, status: "" }));
+  if (args[0] === "app-find") assert.fail("a remote tree never searches this machine");
+  return ok(JSON.stringify({ entries: there[args[1]] ?? [], truncated: false }));
+};
+// The local tab's arrivals and reveal must not keep the remote tab's.
+tree.follow(treeCx);
+await settle();
+assert.deepEqual(asked, [], "nothing asked of the machine while Files is hidden");
+app.layout = stack("files");
+tree.follow(treeCx);
+await settle();
+assert.equal(tree.model.root, "/remote/proj", "rooted at the remote nvim's folder");
+assert.deepEqual(asked.filter(([command]) => command === "app-current").map(([, , ctx]) => ctx), [{ space: "box/s1", tab: "box/t1", terminal: null, cwd: null }]);
+assert.ok(!asked.some(([command, path]) => command === "app-list" && path === "/remote/work"), "never listed the pane's folder");
+assert.ok(asked.some(([command, path, ctx]) => command === "app-list" && path === "/remote/proj" && ctx.cwd === "/remote/proj" && ctx.tab === "box/t1"));
+// nvim moves to another file and folder: nothing follows it...
+nvimThere = { file: "/remote/proj/src/b.js", watch: null, tab_root: "/remote/proj/src" };
+for (let i = 0; i < 3; i++) tree.follow(treeCx);
+await settle();
+assert.equal(asked.filter(([command]) => command === "app-current").length, 1, "no file following on a remote tab");
+assert.equal(tree.model.root, "/remote/proj");
+// ...until the tree gets the keyboard (the app's "focus"), every time.
+command("focus");
+await settle();
+assert.equal(tree.model.root, "/remote/proj/src", "the arrival adopts nvim's folder");
+assert.equal(tree.current, "/remote/proj/src/b.js", "the arrival reveals nvim's file");
+nvimThere = { file: "/remote/proj/src/a.js", watch: null, tab_root: "/remote/proj/src" };
+command("focus");
+await settle();
+assert.equal(tree.current, "/remote/proj/src/a.js", "a later arrival reveals again");
+assert.equal(app.notified.length, 0);
+// The machine failing nvim's file toasts once, however often it is asked.
+currentFails = { code: 1, stdout: "", stderr: "herdr-nvim: box: machine is unavailable" };
+command("focus");
+await settle();
+await tree.revealCurrent(treeCx, true);
+await settle();
+assert.deepEqual(app.notified, [{ title: "Cannot list files on box", body: "box: machine is unavailable", level: "error" }]);
+assert.equal(app.overlays.length, 0, "no Neovim card for a remote tab");
+currentFails = null;
+app.notified = [];
+// What it can't do there says so, and `/` never searches this machine.
+tree.actions.find();
+assert.equal(tree.filter, null);
+tree.actions.systemOpen(tree.visibleRows()[0]);
+tree.action("rename", tree.visibleRows()[0], treeCx);
+assert.deepEqual(app.notified.map((n) => n.title), ["Not on box", "Not on box", "Not on box"]);
+// Keys and clicks act on what it shows: nothing while the machine fails.
+assert.ok(tree.visibleRows().length > 0);
+tree.error = "box: machine is unavailable";
+assert.deepEqual(tree.visibleRows(), []);
+tree.close();
 
 console.log("js checks: ok");

@@ -9,6 +9,7 @@ export const app = {
   spaces: [],
   shared: {},
   ran: [],
+  notified: [],
   overlays: [],
   platform: "macos",
   home: "/nonexistent-app-home",
@@ -30,8 +31,16 @@ export const setShared = (k, v) => {
   return null;
 };
 export const run = (name, args) => app.ran.push([name, args]);
-export const notify = () => {};
-export const nextCommand = () => new Promise(() => {});
+export const notify = (spec) => app.notified.push(spec);
+// The app's commands to the mod's views (`nextCommand`): `command(name)`
+// hands one to the latest view waiting.
+let waiting = null;
+export const nextCommand = () => new Promise((done) => { waiting = done; });
+export const command = (name) => {
+  const done = waiting;
+  waiting = null;
+  done?.(name);
+};
 export const appHome = () => app.home;
 export const home = () => app.userHome;
 export const readTextFile = async () => { throw new Error("no files in this check"); };
@@ -47,3 +56,11 @@ export const div = () => ({});
 export const svg = () => ({});
 export const h_flex = () => ({});
 export const v_flex = () => ({});
+export const TextView = () => ({});
+export const image = () => ({});
+export const settings = () => ({});
+export const Input = () => ({});
+export const InputState = () => ({});
+export const Scrollbar = () => ({});
+export const VirtualListScrollHandle = { new: () => ({ scroll_to_item() {} }) };
+export const v_virtual_list = () => ({});

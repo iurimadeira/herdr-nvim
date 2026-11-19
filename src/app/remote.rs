@@ -57,7 +57,7 @@ pub(crate) fn require_local(ctx: &cli::AppCtx) -> Result<()> {
     Ok(())
 }
 
-fn raw<'a>(machine: &str, id: &'a str) -> Result<&'a str> {
+pub(crate) fn raw<'a>(machine: &str, id: &'a str) -> Result<&'a str> {
     let (prefix, id) = id
         .split_once('/')
         .context("remote IDs need a machine prefix")?;

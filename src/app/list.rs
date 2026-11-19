@@ -11,12 +11,17 @@
 //! - `ignored`: git ignores it (one repo lookup, the folder's own rules and
 //!   its parents'; a tracked file never is, as with `git check-ignore`).
 
-use std::{cmp::Ordering, fs, path::Path};
+use std::{
+    cmp::Ordering,
+    fs,
+    path::Path,
+    process::{Command, Stdio},
+};
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
-use super::cli;
+use super::{cli, companion};
 
 const LIMIT: usize = 500;
 
@@ -37,14 +42,59 @@ pub struct Entry {
 
 pub fn list_cmd() -> Result<()> {
     let args: Vec<String> = crate::argv::args().skip(2).collect();
-    let usage = "usage: herdr-nvim app-list <dir> [--limit N]";
-    let dir = cli::positional(&args, &["--limit"]).context(usage)?;
+    let usage = "usage: herdr-nvim app-list <dir> [--limit N] [--ctx <json>]";
+    let dir = cli::positional(&args, &["--limit", "--ctx"]).context(usage)?;
     let limit = match cli::flag(&args, "--limit")? {
         Some(n) => n.parse().context(usage)?,
         None => LIMIT,
     };
-    println!("{}", serde_json::to_string(&list(Path::new(dir), limit)?)?);
-    Ok(())
+    companion::serve("app-list", &args, || {
+        Ok(format!(
+            "{}\n",
+            serde_json::to_string(&list(Path::new(dir), limit)?)?
+        ))
+    })
+}
+
+/// `herdr-nvim app-git-status <dir> [--ctx <json>]`: `{top, status}`, the
+/// repo `dir` is in (null outside one) and its `git status --porcelain=v1
+/// -z`, which the tree turns into marks (`tree.js marksFrom`).
+pub fn git_status_cmd() -> Result<()> {
+    let args: Vec<String> = crate::argv::args().skip(2).collect();
+    let dir = cli::positional(&args, &["--ctx"])
+        .context("usage: herdr-nvim app-git-status <dir> [--ctx <json>]")?;
+    companion::serve("app-git-status", &args, || {
+        Ok(format!("{}\n", git_status(Path::new(dir))))
+    })
+}
+
+fn git_status(dir: &Path) -> serde_json::Value {
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let Some(top) = git(&["rev-parse", "--show-toplevel"]) else {
+        return serde_json::json!({"top": null, "status": ""});
+    };
+    // Writes nothing under .git, so the tree's folder watch doesn't fire again.
+    let status = git(&[
+        "--no-optional-locks",
+        "-c",
+        "core.fsmonitor=false",
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--no-renames",
+        "--untracked-files=normal",
+    ]);
+    serde_json::json!({"top": top.trim(), "status": status.unwrap_or_default()})
 }
 
 pub fn list(dir: &Path, limit: usize) -> Result<Listing> {

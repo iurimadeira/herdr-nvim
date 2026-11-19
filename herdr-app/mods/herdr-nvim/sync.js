@@ -13,6 +13,8 @@
 //   nvim open (Changes opens files in it).
 // - the tab's nvim pane appeared or went (picker, `open`, gitview, `:q`): the
 //   panel follows the pane.
+// A remote tab's panel follows the same rule, with its nvim on its machine,
+// except that opening the panel never starts that nvim (`local`).
 // With `tree = "nvim"` the tab bar has no Files button (`filesButton`) and
 // the panel never stays: cmd-e opens or closes the tab's nvim alone
 // (`herdr-nvim.files`), with nvim's own explorer.
@@ -41,6 +43,7 @@
 
 import { focused, layout, nextCommand, notify, panes, run, setShared, shared, spaces, terminals } from "herdr";
 import { isRemote, nvim, place } from "./lib.js";
+import { machineOfContext } from "./path.js";
 import { appConfig, treeMode } from "./ops.js";
 import { pick } from "./pick.js";
 import { welcome } from "./card.js";
@@ -185,8 +188,8 @@ export class Sync {
     const hidByTreeKey = prev?.tab === cur.tab && prev.files && !cur.files && Date.now() - t.keepAt < EXPECT_MS;
     if (prev?.files && !cur.files) t.keepAt = 0;
     const want = wanted(cur, prev, {
-      native: shared("herdr-nvim.tree") !== "nvim" && !isRemote(f.tab),
-      local: !spaces().find((s) => s.id === f.space)?.machine,
+      native: shared("herdr-nvim.tree") !== "nvim",
+      local: !machineOfContext(f),
       kept: t.kept,
       hidByTreeKey,
     });
@@ -437,7 +440,7 @@ export class Sync {
       }
       if (!terminal) terminal = (await this.toggle(at, "open", cx))?.terminal;
       if (!terminal) return;
-      if (mode === "nvim" || isRemote(f.tab)) return run("pane.focus", { terminal });
+      if (mode === "nvim") return run("pane.focus", { terminal });
       // On nvim's file, on purpose: the tree otherwise keeps the selection
       // where the person left it (an empty path: nvim's current file).
       setShared("herdr-nvim.reveal", { tab: f.tab, path: "", n: (shared("herdr-nvim.reveal")?.n ?? 0) + 1 });

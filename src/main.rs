@@ -46,6 +46,8 @@ const SHORT: &[&str] = &[
     "app-config",
     "app-mermaid",
     "app-list",
+    "app-git-status",
+    "app-version",
     "app-remote-stop",
 ];
 
@@ -121,6 +123,10 @@ fn main() {
         // The markdown preview's diagrams.
         ("app-mermaid", _) => run(app::mermaid::mermaid_cmd),
         ("app-list", _) => run(app::list::list_cmd),
+        // A remote tab's tree asks these of the herdr-nvim on its machine
+        // (`app::companion`), where no host is set.
+        ("app-git-status", _) => run(app::list::git_status_cmd),
+        ("app-version", _) => run(app::companion::version_cmd),
         // The "Neovim is needed" card's Install button (a terminal tab).
         ("app-install-nvim", true) => run(nvim_get::install_nvim_cmd),
         (
@@ -133,7 +139,7 @@ fn main() {
         }
         _ => {
             eprintln!(
-                "usage: herdr-nvim <toggle|sidebar|daemon-gc|on-event|daemons|doctor|pick-file|picker|open-link|app-agents|app-send|app-watch|app-install|app-setup|open|fs|app-find|app-current|app-reveal|app-preview|app-config|app-nvim-check|app-install-nvim|app-mermaid|app-remote-stop>"
+                "usage: herdr-nvim <toggle|sidebar|daemon-gc|on-event|daemons|doctor|pick-file|picker|open-link|app-agents|app-send|app-watch|app-install|app-setup|open|fs|app-find|app-current|app-reveal|app-preview|app-config|app-nvim-check|app-install-nvim|app-mermaid|app-list|app-git-status|app-version|app-remote-stop>"
             );
             2
         }
@@ -154,6 +160,16 @@ fn run(f: fn() -> anyhow::Result<()>) -> i32 {
             }
             eprintln!("herdr-nvim: {e:#}");
             3
+        }
+        // The remote machine's herdr-nvim is missing or another build: exit
+        // 4, and for the app's mods what the tree shows.
+        Err(e) if e.downcast_ref::<app::companion::CompanionError>().is_some() => {
+            let error = e
+                .downcast_ref::<app::companion::CompanionError>()
+                .expect("checked");
+            println!("{}", serde_json::json!({"companion": error.to_json()}));
+            eprintln!("herdr-nvim: {e:#}");
+            4
         }
         Err(e) => {
             eprintln!("herdr-nvim: {e:#}");
