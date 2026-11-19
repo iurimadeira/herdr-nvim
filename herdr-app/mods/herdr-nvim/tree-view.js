@@ -20,8 +20,9 @@ import { goToTree, nvimPanes, panelState } from "./panel.js";
 // The tree key when nvim hasn't said (an nvim from before tree_key): <leader>e
 // with LazyVim's leader.
 const TREE_KEY = ["space", "e"];
-import { GIT_EVERY_MS, TreeModel } from "./tree-model.js";
-import { markOf } from "./tree.js";
+import { TreeModel } from "./tree-model.js";
+import { markOf, sourceFor } from "./tree.js";
+import { keepFresh } from "./tree-refresh.js";
 import { KeyboardHandover, TabRoots } from "./tree-parts.js";
 
 const HINT = "? keys";
@@ -88,12 +89,13 @@ export class Tree {
     // Until the new tab's state file is known, none is read (the old tab's
     // would put its file and folder in this one).
     this.watching = null;
-    if (next.machine || !next.cwd) {
-      this.rootTab = next.tab;
+    this.rootTab = next.tab;
+    if (!next.cwd) {
       this.tabRoot = null;
       return this.setRoot(null, cx);
     }
-    this.rootTab = next.tab;
+    // A remote tab's tree is its space's folder there; it follows no file.
+    if (next.machine) return this.adopt(next.tab, next.cwd, cx);
     cx.spawn(async (cx) => {
       const now = await current(next);
       if (this.place?.tab !== next.tab) return;
@@ -128,48 +130,41 @@ export class Tree {
   // back to a tab) keeps the loop, the listing and the selection.
   setRoot(root, cx) {
     if (this.rootTab && root) this.roots.remember(this.rootTab, this.tabRoot, root);
-    if (root && root === this.model.root && !this.error) return;
+    const machine = this.place?.machine ?? null;
+    if (root && root === this.model.root && machine === this.rootMachine && !this.error) return;
+    this.rootMachine = machine;
     const gen = (this.rootGen = (this.rootGen ?? 0) + 1);
     const keep = { hidden: this.model.showHidden, ignored: this.model.showIgnored };
-    this.model.reset(root);
+    this.model.reset(root, sourceFor({ ...tabOf(this.place ?? {}), cwd: root }));
     Object.assign(this.model, { showHidden: keep.hidden, showIgnored: keep.ignored });
     this.selected = 0;
     this.picked.clear();
     this.filter = null;
     this.error = null;
     if (!root) return;
+    const alive = () => this.rootGen === gen;
     cx.spawn(async (cx) => {
       try {
-        await this.model.reload();
-        cx.notify();
-        while (this.rootGen === gen) {
-          const changed = await changesIn(root);
-          if (this.rootGen !== gen) return;
+        await keepFresh({
+          model: this.model,
+          alive,
+          shown: () => Boolean(panelState(layout())?.files),
+          changes: () => changesIn(root),
+          sleep: (ms) => cx.sleep(ms),
+          redraw: () => cx.notify(),
           // Hidden (Files closed): no listing or git status for every change
           // (a build makes many); it catches up once when shown (`render`).
-          if (!panelState(layout())?.files) {
-            this.stale = true;
-            continue;
-          }
-          const { marks } = await this.model.reloadChanged(changed);
-          if (marks === "none") continue; // nothing the tree shows changed
-          cx.notify();
-          if (marks === "later" && !this.marksDue) {
-            this.marksDue = true;
-            cx.spawn(async (cx) => {
-              await cx.sleep(GIT_EVERY_MS);
-              this.marksDue = false;
-              if (this.rootGen !== gen) return;
-              await this.model.refreshMarks();
-              cx.notify();
-            });
-          }
-        }
+          hidden: () => { this.stale = true; },
+          failed: (e) => { this.error = e && String(e.message ?? e); cx.notify(); },
+          notify,
+        });
       } catch (e) {
-        if (this.rootGen === gen) { this.error = String(e); cx.notify(); }
+        if (alive()) { this.error = String(e); cx.notify(); }
       }
     });
-    if (!this.defaults) {
+    // fs.lua's defaults come from the tab's nvim, which a remote tab's tree
+    // doesn't ask (#4).
+    if (!this.defaults && !machine) {
       this.defaults = true;
       cx.spawn(async (cx) => {
         // Quiet: the tree only showed; with no Neovim, the card waits for a
@@ -604,7 +599,8 @@ export class Tree {
     // lost it, and the app's focus doesn't change when it goes back to the
     // same nvim pane, so nvim reports its FocusGained (next to the current
     // file, which this tree watches): every such wake renders this again.
-    const t = theme(), rows = this.rows(), focusedNow = this.handle.is_focused();
+    // A remote machine that can't list shows why, not rows it may no longer have.
+    const t = theme(), rows = this.error ? [] : this.rows(), focusedNow = this.handle.is_focused();
     this.drawnFocused = focusedNow;
     if (this.revealing && !this.filter) {
       const at = rows.findIndex((r) => r.abs === this.revealing);
@@ -619,8 +615,7 @@ export class Tree {
       this.scrolledTo = key;
       this.scroll.scroll_to_item(this.selected);
     }
-    const empty = this.place?.machine ? `This space is on ${this.place.machine}; browse its files with Neovim's own explorer.`
-      : this.error ?? (this.filter ? (this.filter.query ? "No match" : "Type to find a file") : !this.model.root ? "No folder" : this.model.entries.has(this.model.root) ? "No files" : "Loading files…");
+    const empty = this.error ?? (this.filter ? (this.filter.query ? "No match" : "Type to find a file") : !this.model.root ? "No folder" : this.model.entries.has(this.model.root) ? "No files" : "Loading files…");
     return v_flex().id("herdr-nvim-files").size_full().min_h(0).rounded(10).overflow_hidden()
       // The controller hands this tree the keyboard with `pane.go`, which
       // needs it laid out: say when it is.

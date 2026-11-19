@@ -130,8 +130,24 @@ If it then has no socket (it lost it, or never made one), `open` refuses and
 `app-remote-stop --force` ends it anyway: unsaved edits survive only in its
 swap files, and are lost if it runs with `noswapfile`.
 
-The native Files tree, agent-file picker, annotations and rendered previews
-remain local-only.
+The native Files tree lists a remote tab's space folder through the
+herdr-nvim installed on that machine (the companion), with the same entries,
+order, hidden and ignored rules and git marks as a local tree. It refreshes
+every 2 seconds while the tree is shown, and asks the machine nothing while
+it is hidden. Install the companion on each remote machine, built from the
+same commit as the desktop's herdr-nvim, where its core's PATH finds it:
+
+```sh
+cargo install --locked --root ~/.local \
+  --git https://github.com/iurimadeira/herdr-nvim --rev <commit> herdr-nvim
+```
+
+The tree checks the companion's version and commit before each request; a
+missing or different companion shows an error and a toast with the exact
+command for that machine. A desktop build with uncommitted changes matches
+only itself, so remote trees need a committed build. Tree search, file
+operations, the agent-file picker, annotations and rendered previews remain
+local-only.
 
 ## The tree
 

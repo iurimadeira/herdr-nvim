@@ -9,6 +9,7 @@ export const app = {
   spaces: [],
   shared: {},
   ran: [],
+  notified: [],
   overlays: [],
   platform: "macos",
   home: "/nonexistent-app-home",
@@ -30,7 +31,7 @@ export const setShared = (k, v) => {
   return null;
 };
 export const run = (name, args) => app.ran.push([name, args]);
-export const notify = () => {};
+export const notify = (spec) => app.notified.push(spec);
 export const nextCommand = () => new Promise(() => {});
 export const appHome = () => app.home;
 export const home = () => app.userHome;

@@ -2,11 +2,11 @@
 // moved to with `.` / Backspace), the folders that are open, the entries of
 // each (with whether git ignores it), git marks, and the hidden/ignored toggles.
 // Paths are the mod's (path.js); a folder's entries are listed on first open
-// and again when something under the root changes (a folder watch, no
-// polling).
+// and again when something under the root changes (tree-refresh.js), from
+// this machine or a remote tab's (tree.js `sourceFor`).
 
 import { child, dirname, inside, key, relative, same } from "./path.js";
-import { gitMarks, listFolder } from "./tree.js";
+import { RemoteError, sourceFor } from "./tree.js";
 
 const ROWS = 3000;
 
@@ -31,9 +31,10 @@ export class TreeModel {
     this.showIgnored = false;
   }
 
-  reset(root) {
+  reset(root, source = sourceFor(null)) {
     this.version = (this.version ?? 0) + 1;
     this.root = root;
+    this.source = source;
     this.marksAt = 0;
     this.entries = new Map(); // folder -> [{name, dir, hidden, ignored}]
     this.loads = new Map(); // folder -> the latest listing's number
@@ -47,7 +48,7 @@ export class TreeModel {
   async load(folder) {
     const root = this.root, seq = (this.loads.get(folder) ?? 0) + 1;
     this.loads.set(folder, seq);
-    const entries = await listFolder(folder);
+    const entries = await this.source.list(folder);
     if (this.root !== root || this.loads.get(folder) !== seq) return false;
     const same = (e, f) => e.name === f.name && e.dir === f.dir && e.hidden === f.hidden && e.ignored === f.ignored;
     const was = this.entries.get(folder);
@@ -57,15 +58,23 @@ export class TreeModel {
     return true;
   }
 
+  // A folder that can't be listed (gone meanwhile) keeps its rows; a remote
+  // machine that can't list is an error.
   async reload() {
-    await each([this.root, ...this.open], (folder) => this.load(folder).catch(() => {}));
+    await this.loadAll([this.root, ...this.open]);
     await this.refreshMarks();
+  }
+
+  async loadAll(folders) {
+    let failed = null;
+    await each(folders, (folder) => this.load(folder).catch((e) => { if (e instanceof RemoteError) failed ??= e; }));
+    if (failed) throw failed;
   }
 
   async refreshMarks() {
     const root = this.root;
     this.marksAt = Date.now();
-    const marks = await gitMarks(root);
+    const marks = await this.source.marks(root);
     if (this.root === root) this.marks = marks;
   }
 
@@ -100,7 +109,7 @@ export class TreeModel {
     for (const path of seen) {
       for (const folder of [dirname(path), path]) if (listed.has(key(folder))) touched.add(listed.get(key(folder)));
     }
-    await each(touched, (folder) => this.load(folder).catch(() => {}));
+    await this.loadAll(touched);
     if (Date.now() - this.marksAt < GIT_EVERY_MS) return { marks: "later" };
     await this.refreshMarks();
     return { marks: "done" };

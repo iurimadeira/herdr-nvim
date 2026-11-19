@@ -387,4 +387,77 @@ assert.deepEqual(app.ran, [], "remote toggles must use the machine-aware Rust pa
 await remoteSync.startSwap("box/t1", "/remote/image.png", { notify() {} });
 assert.deepEqual(app.ran, [], "unsupported remote previews must not create local preview panes");
 
+// A remote tab's tree: its machine's herdr-nvim lists and reads git there
+// (src/app/companion.rs), the same output a local tree reads here, so the
+// rows and marks are a local tree's.
+const { RemoteError, marksFrom, sourceFor } = await import("../mods/herdr-nvim/tree.js");
+const { POLL_MS, keepFresh } = await import("../mods/herdr-nvim/tree-refresh.js");
+const { notify } = await import("./herdr-stub.mjs");
+const status = " M src/a.js\0?? newdir/\0A  b.js\0 D gone.txt\0UU c.js\0";
+assert.deepEqual(marksFrom("/r", status), marks, "remote marks are parsed as local ones");
+const remoteCtx = { space: "box/s1", tab: "box/t1", terminal: null, cwd: "/remote" };
+const remoteFiles = { "/remote": [entry("src", true), entry("x.md")] };
+let remoteCalls = [];
+let companion = null;
+app.exec = async (cmd, args) => {
+  assert.equal(cmd, bin);
+  assert.deepEqual(args.slice(-2), ["--ctx", JSON.stringify(remoteCtx)]);
+  remoteCalls.push(args.slice(0, 2));
+  if (companion) return { code: 4, stdout: JSON.stringify({ companion }), stderr: `herdr-nvim: ${companion.message}\n` };
+  if (args[0] === "app-git-status") return ok(JSON.stringify({ top: "/remote", status: "?? x.md\0" }));
+  return ok(JSON.stringify({ entries: remoteFiles[args[1]] ?? [], truncated: false }));
+};
+assert.equal(sourceFor({ space: "s1", tab: "t1" }).remote, false, "a local tab is read here");
+const remoteModel = new TreeModel();
+remoteModel.reset("/remote", sourceFor(remoteCtx));
+await remoteModel.reload();
+assert.deepEqual(remoteModel.rows().map((r) => r.abs), ["/remote/src", "/remote/x.md"]);
+assert.equal(markOf(remoteModel.marks, "/remote/x.md"), "A");
+assert.deepEqual(remoteCalls, [["app-list", "/remote"], ["app-git-status", "/remote"]]);
+companion = { machine: "box", problem: "missing", install: "cargo install --locked --root ~/.local --git https://github.com/iurimadeira/herdr-nvim herdr-nvim", message: "herdr-nvim is not installed on box" };
+await assert.rejects(remoteModel.reload(), (e) => e instanceof RemoteError && e.companion.machine === "box");
+companion = null;
+
+// Polling: every POLL_MS while the tree shows, nothing while hidden; a file
+// made there shows on the next poll. A missing herdr-nvim toasts once, names
+// the machine and the install command, and the tree comes back once it is
+// installed.
+const ticks = [];
+const sleep = (ms) => { assert.equal(ms, POLL_MS); return new Promise((done) => ticks.push(done)); };
+const settle = async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); };
+const tick = async () => { ticks.shift()(); await settle(); };
+let shownNow = false, alive = true, errors = [];
+remoteCalls = [];
+app.notified = [];
+const polled = new TreeModel();
+polled.reset("/remote", sourceFor(remoteCtx));
+const loop = keepFresh({
+  model: polled, alive: () => alive, shown: () => shownNow, sleep, notify,
+  changes: () => assert.fail("a remote root has no folder watch"),
+  redraw() {}, hidden() {}, failed: (e) => errors.push(e && e.message),
+});
+await settle();
+assert.deepEqual(remoteCalls.map((c) => c[0]), ["app-list", "app-git-status"], "listed once when set");
+remoteCalls = [];
+for (let i = 0; i < 3; i++) await tick();
+assert.deepEqual(remoteCalls, [], "no remote calls while hidden");
+shownNow = true;
+remoteFiles["/remote"] = [entry("src", true), entry("new.txt"), entry("x.md")];
+await tick();
+assert.deepEqual(polled.rows().map((r) => r.abs), ["/remote/src", "/remote/new.txt", "/remote/x.md"]);
+assert.deepEqual(remoteCalls.map((c) => c[0]), ["app-list", "app-git-status"]);
+companion = { machine: "box", problem: "mismatch", install: "cargo install --rev abc", message: "herdr-nvim on box is 1.0.0 (x), not 1.3.1 (y)" };
+await tick();
+await tick();
+assert.equal(app.notified.length, 1, "one toast, not one per poll");
+assert.match(app.notified[0].title, /box/);
+assert.match(app.notified[0].body, /cargo install --rev abc/);
+assert.equal(app.notified[0].level, "error");
+companion = null;
+await tick();
+assert.deepEqual(errors, ["herdr-nvim on box is 1.0.0 (x), not 1.3.1 (y)", null]);
+alive = false;
+await tick();
+await loop;
+
 console.log("js checks: ok");
