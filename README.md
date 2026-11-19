@@ -135,10 +135,11 @@ swap files, and are lost if it runs with `noswapfile`.
 The native Files tree lists a remote tab's files through the herdr-nvim
 installed on that machine (the companion), with the same entries, order,
 hidden and ignored rules and git marks as a local tree. Its root follows the
-local rule: the folder of the tab's Neovim when it runs there, else the
-focused pane's folder, else the space's folder. When the tree gets the
-keyboard it moves to that Neovim's folder and reveals its file; unlike a local
-tree, it does not follow the file as Neovim changes it. It refreshes every 2
+local rule, asked of the machine once each time you arrive on the tab with
+the tree shown: the folder of the tab's Neovim when it runs there, else the
+git repo of the folder the tab works in, else that folder. Each time the tree
+gets the keyboard it moves to that Neovim's folder again and reveals its file;
+unlike a local tree, it does not follow the file as Neovim changes it. It refreshes every 2
 seconds while the tree is shown and asks the machine nothing while it is
 hidden, then catches up when shown. Install the companion on each remote
 machine, built from the same commit as the desktop's herdr-nvim, where its

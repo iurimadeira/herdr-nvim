@@ -41,7 +41,7 @@ register(`data:text/javascript,${encodeURIComponent(`
     if (["herdr", "gpui-kit", "gpui-base"].includes(spec)) return { url: ${JSON.stringify(new URL("./herdr-stub.mjs", import.meta.url).href)}, shortCircuit: true };
     return next(spec, ctx);
   }`)}`);
-const { app } = await import("./herdr-stub.mjs");
+const { app, command } = await import("./herdr-stub.mjs");
 const { markOf, sourceFor } = await import("../mods/herdr-nvim/tree.js");
 const { TreeModel, fatalListing } = await import("../mods/herdr-nvim/tree-model.js");
 const { panelState } = await import("../mods/herdr-nvim/panel.js");
@@ -571,37 +571,72 @@ alive = false;
 await tick();
 await loop;
 
-// The tree on a machine space's tab follows the local rule: the focused
-// pane's folder until it gets the keyboard, then the folder and file of the
-// tab's nvim there; it never follows nvim's file meanwhile, and every
-// listing goes to the machine with the tab's bare context.
+// The tree on a machine space's tab follows the local rule: rooted where the
+// tab's nvim there works (asked once per arrival, never while Files is
+// hidden), its file revealed whenever the tree gets the keyboard; it never
+// follows nvim's file meanwhile, and every listing goes to the machine with
+// the tab's bare context.
 app.spaces = [{ id: "box/s1", machine: "box", folder: "/remote", active: true }];
 app.focused = { space: "box/s1", tab: "box/t1", pane: "box/p1", terminal: "box/t7" };
 app.panes = [{ pane: "box/p1", terminal: "box/t7", tab: "box/t1", cwd: "/remote/work" }];
-app.layout = stack("files");
+app.layout = stack("files", true);
 app.notified = [];
+app.overlays = [];
 const asked = [];
-const there = { "/remote/work": [entry("w.txt")], "/remote/proj": [entry("src", true)], "/remote/proj/src": [entry("a.js")] };
+const there = { "/remote/work": [entry("w.txt")], "/remote/proj": [entry("src", true)], "/remote/proj/src": [entry("a.js"), entry("b.js")] };
+let nvimThere = { file: "/remote/proj/src/a.js", watch: null, tab_root: "/remote/proj" };
+let currentFails = null;
 app.exec = async (cmd, args) => {
   assert.equal(cmd, bin);
   asked.push([args[0], args[1], JSON.parse(args.at(-1))]);
-  if (args[0] === "app-current") return ok(JSON.stringify({ file: "/remote/proj/src/a.js", watch: null, tab_root: "/remote/proj" }));
+  if (args[0] === "app-current") {
+    assert.equal(args.length, 3, args.join(" "));
+    return currentFails ?? ok(JSON.stringify(nvimThere));
+  }
   if (args[0] === "app-git-status") return ok(JSON.stringify({ top: null, status: "" }));
   if (args[0] === "app-find") assert.fail("a remote tree never searches this machine");
   return ok(JSON.stringify({ entries: there[args[1]] ?? [], truncated: false }));
 };
 const treeCx = { focus_handle: () => ({ is_focused: () => false, focus() {} }), spawn: (fn) => { fn(treeCx); }, notify() {}, sleep: (ms) => new Promise((done) => setTimeout(done, ms).unref()) };
 const tree = new Tree(treeCx);
+// A local tab's reveal first: the remote tab's arrivals must not keep it.
+tree.current = "/r/local.js";
 tree.follow(treeCx);
 await settle();
-assert.equal(tree.model.root, "/remote/work");
-assert.deepEqual(asked[0], ["app-list", "/remote/work", { space: "box/s1", tab: "box/t1", terminal: null, cwd: "/remote/work" }]);
-assert.ok(!asked.some(([command]) => command === "app-current"), "no file following on a remote tab");
+assert.deepEqual(asked, [], "nothing asked of the machine while Files is hidden");
+app.layout = stack("files");
+tree.follow(treeCx);
+await settle();
+assert.equal(tree.model.root, "/remote/proj", "rooted at the remote nvim's folder");
+assert.deepEqual(asked.filter(([command]) => command === "app-current").map(([, , ctx]) => ctx), [{ space: "box/s1", tab: "box/t1", terminal: null, cwd: null }]);
+assert.ok(!asked.some(([command, path]) => command === "app-list" && path === "/remote/work"), "never listed the pane's folder");
+assert.ok(asked.some(([command, path, ctx]) => command === "app-list" && path === "/remote/proj" && ctx.cwd === "/remote/proj" && ctx.tab === "box/t1"));
+// nvim moves to another file and folder: nothing follows it...
+nvimThere = { file: "/remote/proj/src/b.js", watch: null, tab_root: "/remote/proj/src" };
+for (let i = 0; i < 3; i++) tree.follow(treeCx);
+await settle();
+assert.equal(asked.filter(([command]) => command === "app-current").length, 1, "no file following on a remote tab");
+assert.equal(tree.model.root, "/remote/proj");
+// ...until the tree gets the keyboard (the app's "focus"), every time.
+command("focus");
+await settle();
+assert.equal(tree.model.root, "/remote/proj/src", "the arrival adopts nvim's folder");
+assert.equal(tree.current, "/remote/proj/src/b.js", "the arrival reveals nvim's file");
+nvimThere = { file: "/remote/proj/src/a.js", watch: null, tab_root: "/remote/proj/src" };
+command("focus");
+await settle();
+assert.equal(tree.current, "/remote/proj/src/a.js", "a later arrival reveals again");
+assert.equal(app.notified.length, 0);
+// The machine failing nvim's file toasts once, however often it is asked.
+currentFails = { code: 1, stdout: "", stderr: "herdr-nvim: box: machine is unavailable" };
+command("focus");
+await settle();
 await tree.revealCurrent(treeCx, true);
 await settle();
-assert.equal(tree.model.root, "/remote/proj");
-assert.equal(tree.current, "/remote/proj/src/a.js", "nvim's file revealed");
-assert.ok(asked.some(([command, path, ctx]) => command === "app-list" && path === "/remote/proj" && ctx.cwd === "/remote/proj" && ctx.tab === "box/t1"));
+assert.deepEqual(app.notified, [{ title: "Cannot list files on box", body: "box: machine is unavailable", level: "error" }]);
+assert.equal(app.overlays.length, 0, "no Neovim card for a remote tab");
+currentFails = null;
+app.notified = [];
 // What it can't do there says so, and `/` never searches this machine.
 tree.actions.find();
 assert.equal(tree.filter, null);

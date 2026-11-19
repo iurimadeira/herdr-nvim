@@ -315,7 +315,9 @@ copy of it, else clones it once (`<name>-copy`), and switches to it.
   tab's nvim by the local rule (`sync.js`), but Files never starts it there
   (`local`). The native tree lists
   a remote tab's files through the companion (above), rooted by the local
-  rule, revealing nvim's file when it gets the keyboard but not following it;
+  rule (`app-current` on the machine, once per arrival on the tab with the
+  tree shown), revealing nvim's file each time it gets the keyboard but not
+  following it;
   its search and file operations, the picker, annotations and rendered
   previews remain local-only.
 

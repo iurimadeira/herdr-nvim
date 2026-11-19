@@ -32,7 +32,15 @@ export const setShared = (k, v) => {
 };
 export const run = (name, args) => app.ran.push([name, args]);
 export const notify = (spec) => app.notified.push(spec);
-export const nextCommand = () => new Promise(() => {});
+// The app's commands to the mod's views (`nextCommand`): `command(name)`
+// hands one to the latest view waiting.
+let waiting = null;
+export const nextCommand = () => new Promise((done) => { waiting = done; });
+export const command = (name) => {
+  const done = waiting;
+  waiting = null;
+  done?.(name);
+};
 export const appHome = () => app.home;
 export const home = () => app.userHome;
 export const readTextFile = async () => { throw new Error("no files in this check"); };

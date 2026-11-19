@@ -55,9 +55,10 @@ the fork is synced with `upstream/main` periodically.
   herdr-nvim plugin on its runtimepath, so plugin features work there. Hiding
   keeps buffers, undo and cursor. Closing the Herdr tab stops its remote daemon.
 - **Tree listing:** the tree in a remote space lists, on the remote host, the
-  folder a local tree would root at (the tab's Neovim's folder, else the
-  focused pane's, else the space folder; it reveals Neovim's file when it gets
-  the keyboard, without following it continuously) and shows the same entries, ordering, hidden-file rules and git
+  folder a local tree would root at (the tab's Neovim's folder, else the git
+  repo of the folder the tab works in, else that folder; it moves to that
+  folder again and reveals Neovim's file each time it gets the keyboard,
+  without following it continuously) and shows the same entries, ordering, hidden-file rules and git
   marks as a local tree would for the same folder contents.
 - **Tree refresh:** while the tree is visible, the remote listing and git marks
   are polled every 2 seconds. While it is hidden, nothing is polled. A file

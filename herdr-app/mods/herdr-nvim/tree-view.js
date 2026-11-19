@@ -21,8 +21,8 @@ import { goToTree, nvimPanes, panelState } from "./panel.js";
 // with LazyVim's leader.
 const TREE_KEY = ["space", "e"];
 import { TreeModel } from "./tree-model.js";
-import { markOf, sourceFor } from "./tree.js";
-import { keepFresh } from "./tree-refresh.js";
+import { markOf, remoteCurrent, sourceFor } from "./tree.js";
+import { keepFresh, remoteToast } from "./tree-refresh.js";
 import { KeyboardHandover, TabRoots } from "./tree-parts.js";
 
 const HINT = "? keys";
@@ -62,9 +62,11 @@ export class Tree {
         if (command === "focus") {
           // The selection stays where the person left it: nvim's file changes
           // already move it (watchCurrent), and cmd-shift-e / <leader>E reveal
-          // on purpose (shared "herdr-nvim.reveal"). Only the first arrival,
-          // before the tree knows nvim's file, picks it (else the first row).
-          const keep = this.overlayOpen || this.pressing || this.current != null;
+          // on purpose (shared "herdr-nvim.reveal"). Only the first arrival
+          // on a tab, before the tree knows nvim's file, picks it (else the
+          // first row). A remote tab's nvim is not watched: every arrival
+          // picks its file and folder.
+          const keep = this.overlayOpen || this.pressing || (!this.place?.machine && this.current != null);
           this.overlayOpen = this.pressing = false;
           this.handover.arrive(cx);
           cx.notify();
@@ -82,33 +84,69 @@ export class Tree {
   }
 
   // Follow the focused tab. The root is the tab's folder (where the tab's
-  // nvim works, as a real path; before it runs, the focused pane's folder,
-  // else the space's), or one the person chose with `.` / ⌫ for this tab;
-  // focusing another pane of the tab never moves it. Local or remote alike.
+  // nvim works, as a real path; before it runs, where it would start), or
+  // one the person chose with `.` / ⌫ for this tab; focusing another pane of
+  // the tab never moves it. Local or remote alike.
   follow(cx) {
     const next = place(this.place);
     const moved = next.tab !== this.place?.tab || next.machine !== this.place?.machine || (!this.rootTab && next.cwd);
     this.place = next;
-    if (!moved) return;
+    if (!moved) return this.askRemote(cx);
     // Until the new tab's state file is known, none is read (the old tab's
     // would put its file and folder in this one).
     this.watching = null;
     this.rootTab = next.tab;
+    this.current = null;
+    this.asking = null;
     if (!next.cwd) {
       this.tabRoot = null;
       return this.setRoot(null, cx);
     }
     // A remote tab's nvim is on its machine, with no state file here to
-    // watch: the tree starts at the pane's folder and moves to nvim's folder
-    // and file when it gets the keyboard (`revealCurrent`), not as nvim
-    // changes files.
-    if (next.machine) return this.adopt(next.tab, next.cwd, cx);
+    // watch: its machine is asked once per arrival on the tab, and not
+    // before the tree shows (`askRemote`); the tree moves to nvim's folder
+    // and file again when it gets the keyboard (`revealCurrent`), not as
+    // nvim changes files.
+    if (next.machine) {
+      this.asking = next;
+      return this.askRemote(cx);
+    }
     cx.spawn(async (cx) => {
       const now = await current(next);
       if (this.place?.tab !== next.tab) return;
       this.adopt(next.tab, now.tab_root ?? next.cwd, cx);
       this.watchCurrent(next, cx, now);
     });
+  }
+
+  // The remote tab's folder, asked once the tree shows (`follow` runs on
+  // each render).
+  askRemote(cx) {
+    const at = this.asking;
+    if (!at || !filesShown()) return;
+    this.asking = null;
+    cx.spawn(async (cx) => {
+      const now = await this.ask(at);
+      if (this.place?.tab !== at.tab) return;
+      this.adopt(at.tab, now?.tab_root ?? at.cwd, cx);
+    });
+  }
+
+  // What the tab's nvim shows ({file, watch, tab_root}), as `current`. A
+  // remote tab's machine's failures toast as its listing's do (`toastOnce`),
+  // and answer null.
+  async ask(at) {
+    if (!at.machine) return current(at);
+    return remoteCurrent(tabOf(at)).catch((e) => (this.toastOnce(remoteToast(e)), null));
+  }
+
+  // One toast per remote failure, whichever asked (the listing, the poll,
+  // nvim's file), until the machine answers a listing again.
+  toastOnce(toast) {
+    const said = `${toast.title}\n${toast.body}`;
+    if (said === this.toasted) return;
+    this.toasted = said;
+    notify(toast);
   }
 
   // The tab's folder is `tabRoot`: show the root chosen for this tab, unless
@@ -163,8 +201,12 @@ export class Tree {
           // (a build makes many), and nothing asked of a remote machine; it
           // catches up once when shown (`render`).
           hidden: () => { this.stale = true; },
-          failed: (e) => { this.error = e && String(e.message ?? e); cx.notify(); },
-          notify,
+          failed: (e) => {
+            this.error = e && String(e.message ?? e);
+            if (!e) this.toasted = null;
+            cx.notify();
+          },
+          notify: (toast) => this.toastOnce(toast),
         });
       } catch (e) {
         if (alive()) { this.error = String(e); cx.notify(); }
@@ -242,7 +284,7 @@ export class Tree {
     // Once the tree watches the tab's state file, it holds both (real paths,
     // app.lua `write_state`): no process. Before, herdr-nvim answers.
     const state = this.watching && this.watchingTab === this.place.tab ? await this.nvimState() : null;
-    const { file, tab_root } = state?.cwd ? { file: state.file ?? null, tab_root: state.cwd } : await current(this.place);
+    const { file, tab_root } = state?.cwd ? { file: state.file ?? null, tab_root: state.cwd } : ((await this.ask(this.place)) ?? {});
     if (seq !== this.revealSeq) return;
     if (tab_root && !same(tab_root, this.tabRoot)) this.adopt(this.rootTab, tab_root, cx);
     if (file && inside(file, this.model.root ?? "")) await this.reveal(file, cx);

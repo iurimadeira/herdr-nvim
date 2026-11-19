@@ -16,23 +16,31 @@ export class RemoteError extends Error {
   }
 }
 
-// `herdr-nvim <command> <path>`'s JSON answer: here, or with a remote tab's
+// `herdr-nvim <command> [path]`'s JSON answer: here, or with a remote tab's
 // `ctx` (`machine`) by the herdr-nvim on its machine. Every failure there is
 // a RemoteError.
 async function app(command, path, ctx = null, machine = null) {
   const failed = (message, companion = null) => (machine ? new RemoteError(message, machine, companion) : new Error(message));
   let r;
   try {
-    r = await exec(bin(), [command, path, ...(ctx ? ["--ctx", JSON.stringify(ctx)] : [])]);
+    r = await exec(bin(), [command, ...(path == null ? [] : [path]), ...(ctx ? ["--ctx", JSON.stringify(ctx)] : [])]);
   } catch (e) {
     throw failed(`${bin()}: ${e?.message ?? e}`);
   }
   if (r.code === 0) {
-    try { return JSON.parse(r.stdout); } catch { throw failed(`${command} ${path}: not an answer: ${r.stdout.trim().slice(0, 200)}`); }
+    try { return JSON.parse(r.stdout); } catch { throw failed(`${[command, path].filter((x) => x != null).join(" ")}: not an answer: ${r.stdout.trim().slice(0, 200)}`); }
   }
   let companion = null;
   try { companion = JSON.parse(r.stdout).companion ?? null; } catch {}
-  throw failed(companion?.message ?? (r.stderr.trim().replace(/^herdr-nvim: /, "") || `Cannot read ${path} (exit ${r.code})`), companion);
+  throw failed(companion?.message ?? (r.stderr.trim().replace(/^herdr-nvim: /, "") || `Cannot read ${path ?? command} (exit ${r.code})`), companion);
+}
+
+// A remote tab's nvim, asked on its machine (src/app/remote.rs `current`):
+// its file and folder while it runs, else the folder the local rule gives.
+// Failures are RemoteErrors, never the "Neovim is needed" card.
+export async function remoteCurrent(ctx) {
+  const now = await app("app-current", null, ctx, machineOfContext(ctx));
+  return { file: canonical(now?.file), watch: null, tab_root: canonical(now?.tab_root) };
 }
 
 // The marks in `git status --porcelain=v1 -z` output, for the repo at `top`.
